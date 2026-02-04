@@ -857,6 +857,573 @@ Here's the full picture:
 
 ---
 
+## Part 8: Real-Life Impact (Coding, Learning, Math, Logic, Relationships)
+
+Okay, enough theory. How does this actually fuck with my daily life?
+
+---
+
+### Impact on Coding
+
+Coding uses several types of memory:
+
+```
+MEMORY TYPES IN PROGRAMMING
+
+┌─────────────────────────────────────────────────────────────────┐
+│  TYPE              │  WHAT IT'S FOR           │  MEDICATION HIT │
+├────────────────────┼──────────────────────────┼─────────────────┤
+│  Working memory    │  Hold variables, flow    │  -8% (minor)    │
+│                    │  in head while coding    │                 │
+├────────────────────┼──────────────────────────┼─────────────────┤
+│  Episodic memory   │  "What was I doing       │  -50% emotional │
+│                    │  before the meeting?"    │  -2% neutral    │
+├────────────────────┼──────────────────────────┼─────────────────┤
+│  Semantic memory   │  Syntax, APIs, patterns  │  -5% (okay)     │
+│                    │  you've learned          │                 │
+├────────────────────┼──────────────────────────┼─────────────────┤
+│  Procedural memory │  How to type, IDE        │  Unaffected     │
+│                    │  shortcuts, muscle mem   │                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**The actual problems:**
+
+1. **Context loss on interruption** — This is the big one
+   ```
+   You're debugging something complex
+   Slack notification → 15 min meeting
+   Come back: "...what was I doing?"
+
+   The EMOTIONAL tag that would normally flag
+   "this is important, remember where you are"
+   is dampened by sertraline.
+
+   Without the "this matters" feeling, your brain
+   doesn't prioritize storing the context.
+   ```
+
+2. **Forgetting what you've already tried**
+   ```
+   Debugging a bug for 2 hours
+   Try approach A, B, C, D
+   Get distracted
+   Come back: "Did I already try changing the timeout?"
+
+   Each failed attempt should create a mild frustration
+   memory. Sertraline blunts that. You forget what didn't work.
+   ```
+
+3. **Losing the "aha" moments**
+   ```
+   Finally figure out the bug at 10pm
+   "Oh! It's a race condition in the queue handler"
+   Take zolpidem at 11pm
+
+   Next morning: "I fixed something... what was the insight?"
+
+   The zolpidem amnesia window ate your eureka moment.
+   ```
+
+4. **Morning fog affecting code quality**
+   ```
+   Zolpidem residual effects: -10% attention until ~9am
+   Code written at 7am: more bugs, missed edge cases
+
+   Best coding window: 9am-6pm (tofisopam active, others stable)
+   ```
+
+**How the system helps with coding:**
+
+```
+DAEMON COMPENSATION FOR CODING
+
+┌─────────────────────────────────────────────────────────────────┐
+│  PROBLEM                    │  DAEMON SOLUTION                  │
+├─────────────────────────────┼───────────────────────────────────┤
+│  Context loss on            │  Proactive context surfacing      │
+│  interruption               │  "Before the meeting, you were    │
+│                             │  at worker/retry.go:142 testing   │
+│                             │  exponential backoff"             │
+├─────────────────────────────┼───────────────────────────────────┤
+│  Forgetting what you tried  │  Git state monitoring             │
+│                             │  Track uncommitted changes        │
+│                             │  "You've tried: timeout=30s,      │
+│                             │  timeout=60s, removing retry"     │
+├─────────────────────────────┼───────────────────────────────────┤
+│  Losing insights            │  Aggressive capture 10pm-11pm     │
+│  to zolpidem window         │  Morning reconstruction:          │
+│                             │  "Last night you discovered       │
+│                             │  the race condition was in..."    │
+├─────────────────────────────┼───────────────────────────────────┤
+│  Morning fog                │  Hearth displays:                 │
+│                             │  "Cognitive capacity: 80%"        │
+│                             │  "Suggested: lighter tasks        │
+│                             │  until 9am"                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**The Hearth for coding:**
+
+```
+┌─────────────────────────────────────────┐
+│  THE HEARTH (desk display)              │
+│                                         │
+│  Morning 7:30am:                        │
+│  ┌─────────────────────────────────┐    │
+│  │  ☀️ Good morning                │    │
+│  │                                 │    │
+│  │  Last night you were working on │    │
+│  │  the webhook retry bug.         │    │
+│  │                                 │    │
+│  │  Insight captured at 10:47pm:   │    │
+│  │  "Race condition in queue -     │    │
+│  │   the worker picks up job       │    │
+│  │   before status update commits" │    │
+│  │                                 │    │
+│  │  Focus capacity: ████████░░ 82% │    │
+│  │  Best window starts: ~9am       │    │
+│  └─────────────────────────────────┘    │
+│                                         │
+│  E-ink display — glanceable, ambient    │
+│  LED ring: soft pulse if something      │
+│  needs your attention                   │
+│                                         │
+└─────────────────────────────────────────┘
+```
+
+---
+
+### Impact on Learning
+
+Learning new things requires:
+1. **Encoding** — getting it into short-term memory
+2. **Consolidation** — sleep-dependent transfer to long-term
+3. **Retrieval** — being able to access it later
+4. **Spaced repetition** — reactivation to prevent decay
+
+**Where meds hurt learning:**
+
+```
+LEARNING A NEW FRAMEWORK (e.g., learning Rust)
+
+NORMAL BRAIN:
+  Day 1: Learn ownership concepts (emotional: "this is cool/hard!")
+         Strong encoding due to novelty + emotion
+         Night: REM consolidates, ties to existing knowledge
+  Day 2: Recall is good, build on it
+  Day 7: Still remember core concepts
+
+ON YOUR MEDS:
+  Day 1: Learn ownership concepts (emotional: "meh, it's fine")
+         Weaker encoding (sertraline blunts the "cool/hard" feeling)
+         Night: Less REM → emotional aspects don't consolidate well
+  Day 2: "Wait, what's the borrow checker again?"
+  Day 7: "I read something about ownership... what was it?"
+```
+
+**The specific hit:**
+
+```
+LEARNING EFFICIENCY BY TYPE
+
+                              BASELINE    ON MEDS     IMPACT
+                              ────────    ───────     ──────
+Exciting new concept           0.8         0.45       -44%
+(high novelty, high emotion)
+
+Dry documentation              0.5         0.48       -4%
+(low emotion, just facts)
+
+Learning by doing              0.7         0.60       -14%
+(procedural + declarative)
+
+Connecting concepts            0.75        0.40       -47%
+(relies on emotional "aha!")
+
+THE IRONY:
+  Boring stuff → barely affected
+  Exciting stuff → heavily impaired
+
+  Your brain now optimizes for mediocrity.
+```
+
+**How the system helps with learning:**
+
+```
+LEARNING COMPENSATION STRATEGIES
+
+┌─────────────────────────────────────────────────────────────────┐
+│  1. EXTERNAL EMOTIONAL TAGGING                                  │
+│                                                                 │
+│     Learning Rust ownership:                                    │
+│     - Daemon detects topic = "new concept"                     │
+│     - Shard detects elevated heart rate (engaged)              │
+│     - System flags as "learning moment" → high salience        │
+│     - Even if YOU don't feel excited, system marks it          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  2. ACCELERATED SPACED REPETITION                               │
+│                                                                 │
+│     Normal schedule: Day 1, Day 3, Day 7, Day 14               │
+│     Your schedule:   Day 1, Day 2, Day 4, Day 7, Day 10        │
+│                                                                 │
+│     Daemon surfaces: "Yesterday you learned about borrowing.   │
+│     Key insight: references can't outlive their referent."     │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  3. CONNECTION ASSISTANCE                                       │
+│                                                                 │
+│     When learning new concept:                                  │
+│     Daemon searches existing memories for related patterns      │
+│     Surfaces: "This is similar to RAII in C++ which you        │
+│     learned about in [memory from 2 weeks ago]"                │
+│                                                                 │
+│     Helps build the connections your REM-deprived sleep isn't  │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  4. OPTIMAL LEARNING WINDOWS                                    │
+│                                                                 │
+│     Hearth suggests: "Your encoding capacity is highest        │
+│     10am-12pm. Consider learning new material now."            │
+│                                                                 │
+│     Avoid learning new things after 9pm (approaching           │
+│     zolpidem window, won't consolidate well)                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Impact on Math
+
+Good news: math is less affected than emotional/episodic memory.
+
+**Why math is relatively spared:**
+
+```
+MATH USES DIFFERENT SYSTEMS
+
+1. Working memory — holding intermediate results
+   Impact: -8% (minor)
+
+2. Procedural memory — how to do operations
+   Impact: unaffected
+
+3. Pattern recognition — seeing structure
+   Impact: -5% (minor)
+
+4. Semantic memory — formulas, theorems
+   Impact: -5% (minor)
+
+Math doesn't rely heavily on emotional tagging.
+The "aha!" moment of understanding a proof might
+be dampened, but the mechanical execution is fine.
+```
+
+**Where it DOES hurt:**
+
+```
+MATHEMATICAL INTUITION
+
+The "feel" for whether an answer is right:
+  Normal: "That doesn't feel right, let me check"
+  On meds: "Is 47 right? I guess?"
+
+This is a subtle emotional signal — your gut
+telling you something's off. Sertraline dampens it.
+
+REMEMBERING WHY A PROOF WORKS:
+  Normal: "I remember this proof because it was
+          so elegant, the trick was beautiful"
+  On meds: "There was a proof... I remember steps
+          1, 2, 3, but why does it work?"
+
+The emotional "elegance" tag that makes proofs
+memorable is weakened.
+```
+
+**Compensation:**
+
+```
+FOR MATH:
+
+1. External "sanity check" — calculator verification
+   for anything important, don't trust intuition
+
+2. Document the "why" explicitly — write down why
+   a proof works, what the insight is, because you
+   won't remember the "aha" feeling
+
+3. More worked examples — procedural memory is
+   unaffected, so practice compensates
+```
+
+---
+
+### Impact on Logic
+
+Similar to math — procedural/formal logic is relatively spared.
+
+```
+LOGIC BREAKDOWN
+
+                              IMPACT
+                              ──────
+Formal deduction               -5%
+(if A then B, A, therefore B)
+
+Holding premises in mind       -8%
+(working memory)
+
+Intuitive reasoning            -30%
+("something feels wrong here")
+
+Remembering why an argument    -40%
+was compelling
+```
+
+**The problem:**
+
+```
+REMEMBERING ARGUMENTS
+
+Normal conversation:
+  Friend: "We should use Postgres because..."
+  You: *remembers the argument because it was compelling*
+
+On meds:
+  Friend: "We should use Postgres because..."
+  You: "We decided Postgres... why again?"
+
+The emotional "this is a good argument" tag is
+what makes you remember WHY, not just WHAT.
+```
+
+**Compensation:**
+
+```
+DAEMON CAPTURES DECISIONS
+
+When it detects decision-making conversation:
+- Flags as high salience
+- Extracts: decision + reasoning
+- Stores explicit "why" alongside "what"
+
+Later query: "Why did we choose Postgres?"
+System: "On Jan 15th, Ravi said CockroachDB's
+licensing made you nervous. Explicit quote:
+'Let's stick with what we know.'"
+
+The external system remembers the WHY.
+```
+
+---
+
+### Impact on Relationships
+
+This is where it hurts most. Relationships run on emotional memory.
+
+```
+RELATIONSHIP MEMORY
+
+What relationships need:
+├── Remember conversations (episodic)
+├── Remember what matters to people (semantic + emotional)
+├── Remember commitments/promises (episodic + emotional tag)
+├── Remember shared experiences (episodic + emotional)
+└── Emotional attunement (real-time emotional processing)
+
+All of these are impacted by sertraline + zolpidem.
+```
+
+**The specific damage:**
+
+```
+SCENARIO: Partner tells you something important at 10pm
+
+Normal brain:
+  Input: "I'm worried about the project deadline"
+  Processing: *empathy, emotional resonance*
+  Encoding: high (emotional salience)
+  Next day: remember conversation, remember feeling
+
+On your meds:
+  Input: "I'm worried about the project deadline"
+  Processing: *dampened empathy, muted response*
+  Encoding: medium (sertraline blunting)
+  Zolpidem taken at 11pm: consolidation compromised
+  Next day: "We talked about... something?"
+
+  Partner: "I told you I was stressed!"
+  You: "...did you?"
+
+THIS HURTS RELATIONSHIPS.
+```
+
+**The forgetting patterns that damage relationships:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PATTERN                      │  RELATIONSHIP IMPACT            │
+├───────────────────────────────┼─────────────────────────────────┤
+│  Forgetting conversations     │  Partner feels unheard          │
+│                               │  "You never listen"             │
+├───────────────────────────────┼─────────────────────────────────┤
+│  Forgetting commitments       │  Breaking promises              │
+│  (especially evening ones)    │  "You said you would..."        │
+├───────────────────────────────┼─────────────────────────────────┤
+│  Emotional blunting           │  Seeming distant, uncaring      │
+│                               │  "You don't seem to care"       │
+├───────────────────────────────┼─────────────────────────────────┤
+│  Forgetting why you were      │  Unresolved conflicts           │
+│  upset or why they were       │  Arguments that never close     │
+├───────────────────────────────┼─────────────────────────────────┤
+│  Forgetting special moments   │  Diminished shared history      │
+│                               │  "Remember when we..."  "No?"   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**How the Shard helps with relationships:**
+
+```
+THE SHARD (pendant) FOR RELATIONSHIPS
+
+When worn during conversations:
+├── Captures audio snippets (with consent)
+├── Detects elevated heart rate (emotional moment)
+├── Flags conversations with people you care about
+└── Creates richer memory entries for relationships
+
+SCENARIO: Conversation with partner at 9pm
+
+Shard captures:
+├── Topic: partner worried about job
+├── Emotional markers: concern in voice, your HR elevated
+├── Key quotes: "I might not get the promotion"
+├── Your response: [captured]
+└── Commitment made: "I'll help you prep for the interview"
+
+Next morning, Hearth shows:
+┌─────────────────────────────────────────┐
+│                                         │
+│  Last night with [Partner]:             │
+│                                         │
+│  They're worried about the promotion.   │
+│  You said you'd help them prep.         │
+│                                         │
+│  Suggested action: follow up today      │
+│                                         │
+└─────────────────────────────────────────┘
+
+The system remembers what you might forget.
+The system reminds you to follow through.
+```
+
+**Commitment tracking:**
+
+```
+PROMISE DETECTION
+
+Shard + Daemon detect commitment language:
+- "I'll do X"
+- "I promise to..."
+- "Let me handle that"
+- "I won't forget"
+
+Creates commitment entry:
+├── What was promised
+├── To whom
+├── When
+├── Context/why
+
+Surfacing:
+├── Reminder before deadline
+├── Morning review of open commitments
+└── Prompt to confirm completion
+
+YOU CAN'T TRUST YOUR BRAIN TO REMEMBER PROMISES.
+The system becomes your external promise-keeper.
+```
+
+**Relationship memory over time:**
+
+```
+BUILDING SHARED HISTORY
+
+The system captures moments that build relationships:
+├── First times ("first time we went to X")
+├── Celebrations
+├── Difficult conversations that got resolved
+├── Inside jokes (detected by laughter + repeated phrases)
+└── What they told you matters to them
+
+Over time:
+  Query: "What does [Partner] care about?"
+  System: "Based on conversations:
+           - Career growth (mentioned 23 times)
+           - Time with family (15 times)
+           - Your health (12 times)
+           - The garden project (8 times)"
+
+  This is knowledge your brain should hold but doesn't.
+```
+
+---
+
+### Summary: Real-Life Impact
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  DOMAIN           │  IMPACT  │  MAIN PROBLEM                   │
+├───────────────────┼──────────┼─────────────────────────────────┤
+│  Coding           │  Medium  │  Context loss on interruption   │
+│                   │          │  Forgetting insights to zolpidem│
+├───────────────────┼──────────┼─────────────────────────────────┤
+│  Learning         │  High    │  New concepts don't stick       │
+│                   │          │  "Aha!" moments weakened        │
+├───────────────────┼──────────┼─────────────────────────────────┤
+│  Math             │  Low     │  Intuition dampened             │
+│                   │          │  Procedural mostly fine         │
+├───────────────────┼──────────┼─────────────────────────────────┤
+│  Logic            │  Low-Med │  Formal fine, intuitive weaker  │
+│                   │          │  Forgetting "why" of arguments  │
+├───────────────────┼──────────┼─────────────────────────────────┤
+│  Relationships    │  HIGH    │  Forgetting conversations       │
+│                   │          │  Missing commitments            │
+│                   │          │  Emotional distance             │
+│                   │          │  Eroding shared history         │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+```
+HOW EACH DEVICE HELPS
+
+┌─────────────────────────────────────────────────────────────────┐
+│  DAEMON (laptop/background)                                     │
+│  ├── Screen capture for work context                           │
+│  ├── Git state for coding history                              │
+│  ├── Consolidation overnight                                   │
+│  ├── Morning surfacing of what matters                         │
+│  └── Spaced repetition for learning                            │
+│                                                                 │
+│  SHARD (pendant)                                                │
+│  ├── Captures conversations (relationships!)                   │
+│  ├── Heart rate for emotional moments                          │
+│  ├── Ambient context when away from laptop                     │
+│  ├── Commitment detection                                      │
+│  └── Fills the gap when you're not at a screen                 │
+│                                                                 │
+│  HEARTH (desk display)                                          │
+│  ├── Morning briefing (what matters today)                     │
+│  ├── Cognitive capacity indicator                              │
+│  ├── Relationship reminders (follow up with X)                 │
+│  ├── Commitment due dates                                      │
+│  └── Ambient, glanceable — doesn't demand attention            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
 ## Summary: The Numbers
 
 ```

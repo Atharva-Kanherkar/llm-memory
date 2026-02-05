@@ -281,6 +281,7 @@ func (t *TUI) printWelcome() {
 	fmt.Println(bold + cyan + "  Integrations:" + reset)
 	fmt.Println(blue + "    /auth" + reset + dim + "      show connected services" + reset)
 	fmt.Println(blue + "    /connect" + reset + dim + "   connect Gmail, Slack, Calendar" + reset)
+	fmt.Println(blue + "    /setup" + reset + dim + "     setup OAuth credentials (CLI)" + reset)
 	fmt.Println(blue + "    /logout" + reset + dim + "    disconnect a service" + reset)
 	fmt.Println()
 	fmt.Println(bold + cyan + "  Privacy:" + reset)
@@ -405,6 +406,13 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 			fmt.Println(dim + "Providers: gmail, slack, calendar" + reset)
 		} else {
 			t.logoutProvider(args[0])
+		}
+
+	case "/setup":
+		if len(args) == 0 {
+			t.showSetupHelp()
+		} else {
+			t.runSetup(ctx, args[0])
 		}
 
 	default:
@@ -1140,6 +1148,12 @@ func (t *TUI) connectProvider(ctx context.Context, provider string) {
 		provider = oauth.ProviderCalendar
 	}
 
+	// Check if credentials are configured
+	if !oauth.IsProviderConfigured(provider) {
+		t.showCredentialsHelp(provider)
+		return
+	}
+
 	fmt.Println()
 	spinner := NewSpinner()
 	spinner.Start("Starting authentication")
@@ -1226,6 +1240,77 @@ func openBrowser(url string) {
 	}
 
 	cmd.Start()
+}
+
+// showCredentialsHelp shows how to set up OAuth credentials for a provider.
+func (t *TUI) showCredentialsHelp(provider string) {
+	fmt.Println()
+	fmt.Println(yellow + "╭─" + reset + bold + " credentials required " + reset + yellow + strings.Repeat("─", 35) + "╮" + reset)
+	fmt.Println(yellow + "│" + reset)
+
+	switch provider {
+	case oauth.ProviderGmail, oauth.ProviderCalendar:
+		fmt.Println(yellow + "│" + reset + " " + bold + "Google OAuth Setup" + reset)
+		fmt.Println(yellow + "│" + reset)
+		fmt.Println(yellow + "│" + reset + " " + cyan + "Option 1: Using gcloud CLI (recommended)" + reset)
+		fmt.Println(yellow + "│" + reset + "   1. Install gcloud: https://cloud.google.com/sdk")
+		fmt.Println(yellow + "│" + reset + "   2. Run: " + green + "/setup google" + reset)
+		fmt.Println(yellow + "│" + reset)
+		fmt.Println(yellow + "│" + reset + " " + cyan + "Option 2: Manual setup" + reset)
+		fmt.Println(yellow + "│" + reset + "   1. Go to: console.cloud.google.com/apis/credentials")
+		fmt.Println(yellow + "│" + reset + "   2. Create OAuth client ID (Desktop app)")
+		fmt.Println(yellow + "│" + reset + "   3. Enable Gmail/Calendar APIs")
+		fmt.Println(yellow + "│" + reset + "   4. Set environment variables:")
+		fmt.Println(yellow + "│" + reset + "      " + dim + "export GOOGLE_CLIENT_ID=\"...\"" + reset)
+		fmt.Println(yellow + "│" + reset + "      " + dim + "export GOOGLE_CLIENT_SECRET=\"...\"" + reset)
+
+	case oauth.ProviderSlack:
+		fmt.Println(yellow + "│" + reset + " " + bold + "Slack OAuth Setup" + reset)
+		fmt.Println(yellow + "│" + reset)
+		fmt.Println(yellow + "│" + reset + "   1. Go to: api.slack.com/apps")
+		fmt.Println(yellow + "│" + reset + "   2. Create New App > From scratch")
+		fmt.Println(yellow + "│" + reset + "   3. OAuth & Permissions > Add scopes:")
+		fmt.Println(yellow + "│" + reset + "      channels:history, channels:read, users:read")
+		fmt.Println(yellow + "│" + reset + "   4. Add redirect URL: http://localhost:8087/callback")
+		fmt.Println(yellow + "│" + reset + "   5. Install to workspace")
+		fmt.Println(yellow + "│" + reset + "   6. Set environment variables:")
+		fmt.Println(yellow + "│" + reset + "      " + dim + "export SLACK_CLIENT_ID=\"...\"" + reset)
+		fmt.Println(yellow + "│" + reset + "      " + dim + "export SLACK_CLIENT_SECRET=\"...\"" + reset)
+	}
+
+	fmt.Println(yellow + "│" + reset)
+	fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// showSetupHelp shows available setup commands.
+func (t *TUI) showSetupHelp() {
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " setup " + reset + blue + strings.Repeat("─", 50) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Usage:" + reset + " /setup <provider>")
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Providers:" + reset)
+	fmt.Println(blue + "│" + reset + "   " + cyan + "google" + reset + "  - Setup Google OAuth (Gmail & Calendar)")
+	fmt.Println(blue + "│" + reset + "   " + magenta + "slack" + reset + "   - Setup Slack OAuth")
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "This will guide you through creating OAuth credentials." + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// runSetup runs the setup wizard for a provider.
+func (t *TUI) runSetup(ctx context.Context, provider string) {
+	wizard := oauth.NewSetupWizard()
+
+	provider = strings.ToLower(provider)
+	switch provider {
+	case "google", "gmail", "calendar":
+		wizard.SetupGoogle(ctx)
+	case "slack":
+		wizard.SetupSlack(ctx)
+	default:
+		fmt.Println(red + "Unknown provider: " + provider + reset)
+		fmt.Println(dim + "Available: google, slack" + reset)
+	}
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

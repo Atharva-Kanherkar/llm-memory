@@ -219,18 +219,49 @@ Captures today's events and upcoming meetings.
 
 ### Setting Up OAuth Credentials
 
+**Option 1: Using gcloud CLI (Recommended for Google)**
+
+```bash
+# In the TUI, run:
+/setup google
+
+# This will:
+# - Check/login to gcloud
+# - Create or select a GCP project
+# - Enable Gmail and Calendar APIs
+# - Guide you through credential creation
+```
+
+**Option 2: Manual Setup**
+
 **Google (Gmail/Calendar):**
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a new project or select existing
-3. Enable Gmail API and Google Calendar API
-4. Create OAuth 2.0 credentials (Desktop application)
-5. Add `http://localhost:8085/callback` and `http://localhost:8086/callback` as redirect URIs
+```bash
+# 1. Go to console.cloud.google.com/apis/credentials
+# 2. Create OAuth client ID (Desktop app)
+# 3. Enable Gmail API and Calendar API
+# 4. Set environment variables:
+export GOOGLE_CLIENT_ID="your-client-id"
+export GOOGLE_CLIENT_SECRET="your-client-secret"
+
+# 5. Connect:
+/connect gmail
+/connect calendar
+```
 
 **Slack:**
-1. Go to [Slack API](https://api.slack.com/apps)
-2. Create a new app
-3. Add OAuth scopes: `channels:history`, `channels:read`, `users:read`
-4. Add `http://localhost:8087/callback` as a redirect URL
+```bash
+# 1. Go to api.slack.com/apps
+# 2. Create New App > From scratch
+# 3. Add OAuth scopes: channels:history, channels:read, users:read
+# 4. Add redirect URL: http://localhost:8087/callback
+# 5. Install to workspace
+# 6. Set environment variables:
+export SLACK_CLIENT_ID="your-client-id"
+export SLACK_CLIENT_SECRET="your-client-secret"
+
+# 7. Connect:
+/connect slack
+```
 
 ## Architecture
 

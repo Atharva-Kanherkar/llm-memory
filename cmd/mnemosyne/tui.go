@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/focus"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/llm"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/notify"
@@ -177,6 +178,10 @@ type TUI struct {
 	socketClient *notify.SocketClient
 	pendingAlert *storage.InsightRecord
 	alertMu      sync.Mutex
+
+	// Focus mode
+	focusBuilder *focus.Builder
+	inFocusChat  bool
 }
 
 // toggleDebug enables or disables debug logging.
@@ -303,6 +308,12 @@ func (t *TUI) printWelcome() {
 	fmt.Println(blue + "    /connect" + reset + dim + "   connect Gmail, Slack, Calendar" + reset)
 	fmt.Println(blue + "    /setup" + reset + dim + "     setup OAuth credentials (CLI)" + reset)
 	fmt.Println(blue + "    /logout" + reset + dim + "    disconnect a service" + reset)
+	fmt.Println()
+	fmt.Println(bold + cyan + "  Focus Mode:" + reset)
+	fmt.Println(green + "    /mode" + reset + dim + "      create a new focus mode" + reset)
+	fmt.Println(green + "    /modes" + reset + dim + "     list saved focus modes" + reset)
+	fmt.Println(green + "    /start" + reset + dim + "     start a focus session" + reset)
+	fmt.Println(green + "    /stop" + reset + dim + "      stop focus mode" + reset)
 	fmt.Println()
 	fmt.Println(bold + cyan + "  Privacy:" + reset)
 	fmt.Println(red + "    /privacy" + reset + dim + "   view privacy settings" + reset)
@@ -443,6 +454,26 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 
 	case "/trigger":
 		t.triggerInsights(ctx)
+
+	case "/mode", "/focus":
+		t.startFocusMode(ctx)
+
+	case "/modes":
+		t.listFocusModes(ctx)
+
+	case "/start":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /start <mode-name-or-id>" + reset)
+			fmt.Println(dim + "Use /modes to see available modes" + reset)
+		} else {
+			t.startFocusSession(ctx, strings.Join(args, " "))
+		}
+
+	case "/stop":
+		t.stopFocusSession(ctx)
+
+	case "/status":
+		t.showFocusStatus(ctx)
 
 	default:
 		fmt.Printf(red+"Unknown command: %s\n"+reset, cmd)
@@ -1699,6 +1730,311 @@ func (t *TUI) showAlerts(ctx context.Context) {
 	fmt.Println(yellow + "│" + reset + " " + dim + "Insights are generated from stress patterns, context," + reset)
 	fmt.Println(yellow + "│" + reset + " " + dim + "and periodic LLM analysis of your activity." + reset)
 	fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// startFocusMode starts an interactive conversation to create a focus mode.
+func (t *TUI) startFocusMode(ctx context.Context) {
+	if t.apiKey == "" {
+		fmt.Println(red + "Error: No API key configured" + reset)
+		return
+	}
+
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	// Create a new builder
+	t.focusBuilder = focus.NewBuilder(t.store, t.apiKey, "openai/gpt-4o-mini")
+	t.inFocusChat = true
+
+	fmt.Println()
+	fmt.Println(green + "╭─" + reset + bold + " focus mode builder " + reset + green + strings.Repeat("─", 37) + "╮" + reset)
+	fmt.Println(green + "│" + reset)
+	fmt.Println(green + "│" + reset + " " + dim + "Let's create a focus mode for you." + reset)
+	fmt.Println(green + "│" + reset + " " + dim + "Type 'cancel' to exit." + reset)
+	fmt.Println(green + "│" + reset)
+
+	// Get initial prompt from LLM
+	initialResponse := t.focusBuilder.Start()
+	fmt.Printf(green+"│"+reset+" %s%s%s\n", cyan, initialResponse, reset)
+	fmt.Println(green + "│" + reset)
+
+	// Interactive conversation loop
+	for t.inFocusChat {
+		fmt.Print(green + "│" + reset + " " + brightCyan + "You: " + reset)
+		input, err := t.reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+
+		if strings.ToLower(input) == "cancel" {
+			fmt.Println(green + "│" + reset + " " + dim + "Cancelled." + reset)
+			t.inFocusChat = false
+			t.focusBuilder = nil
+			break
+		}
+
+		// Send to builder
+		response, mode, err := t.focusBuilder.Chat(input)
+		if err != nil {
+			fmt.Printf(green+"│"+reset+" "+red+"Error: %v%s\n", err, reset)
+			continue
+		}
+
+		fmt.Println(green + "│" + reset)
+		fmt.Printf(green+"│"+reset+" %s%s%s\n", cyan, response, reset)
+		fmt.Println(green + "│" + reset)
+
+		// Check if mode is complete
+		if mode != nil {
+			t.inFocusChat = false
+			t.focusBuilder = nil
+
+			fmt.Println(green + "│" + reset + " " + bold + green + "✓ Focus mode created!" + reset)
+			fmt.Println(green + "│" + reset)
+			fmt.Printf(green+"│"+reset+"   Name: %s%s%s\n", bold, mode.Name, reset)
+			fmt.Printf(green+"│"+reset+"   Purpose: %s%s%s\n", dim, mode.Purpose, reset)
+			fmt.Printf(green+"│"+reset+"   Allowed apps: %s%v%s\n", dim, mode.AllowedApps, reset)
+			fmt.Printf(green+"│"+reset+"   Blocked apps: %s%v%s\n", dim, mode.BlockedApps, reset)
+			fmt.Printf(green+"│"+reset+"   Blocked patterns: %s%v%s\n", dim, mode.BlockedPatterns, reset)
+			if mode.DurationMinutes > 0 {
+				fmt.Printf(green+"│"+reset+"   Duration: %s%d minutes%s\n", dim, mode.DurationMinutes, reset)
+			}
+			fmt.Println(green + "│" + reset)
+			fmt.Printf(green+"│"+reset+" Use %s/start %s%s to begin.\n", cyan, mode.Name, reset)
+		}
+	}
+
+	fmt.Println(green + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// listFocusModes shows all saved focus modes.
+func (t *TUI) listFocusModes(ctx context.Context) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	modes, err := t.store.ListFocusModes()
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(green + "╭─" + reset + bold + " focus modes " + reset + green + strings.Repeat("─", 44) + "╮" + reset)
+
+	if len(modes) == 0 {
+		fmt.Println(green + "│" + reset)
+		fmt.Println(green + "│" + reset + " " + dim + "No focus modes created yet." + reset)
+		fmt.Println(green + "│" + reset + " " + dim + "Use /mode to create one." + reset)
+		fmt.Println(green + "│" + reset)
+		fmt.Println(green + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	fmt.Println(green + "│" + reset)
+	for _, m := range modes {
+		// Parse apps
+		allowedApps := focus.UnmarshalStringSlice(m.AllowedApps)
+		blockedApps := focus.UnmarshalStringSlice(m.BlockedApps)
+
+		fmt.Printf(green+"│"+reset+" %s%s%s %s(%s)%s\n", bold, m.Name, reset, dim, m.ID[:8], reset)
+		fmt.Printf(green+"│"+reset+"   %s%s%s\n", dim, m.Purpose, reset)
+		if len(allowedApps) > 0 {
+			appsStr := strings.Join(allowedApps, ", ")
+			if len(appsStr) > 40 {
+				appsStr = appsStr[:37] + "..."
+			}
+			fmt.Printf(green+"│"+reset+"   Allowed: %s%s%s\n", cyan, appsStr, reset)
+		}
+		if len(blockedApps) > 0 {
+			appsStr := strings.Join(blockedApps, ", ")
+			if len(appsStr) > 40 {
+				appsStr = appsStr[:37] + "..."
+			}
+			fmt.Printf(green+"│"+reset+"   Blocked: %s%s%s\n", red, appsStr, reset)
+		}
+		if m.DurationMinutes > 0 {
+			fmt.Printf(green+"│"+reset+"   Duration: %s%d min%s\n", dim, m.DurationMinutes, reset)
+		}
+
+		// Get stats
+		sessions, minutes, blocks, _ := t.store.GetFocusSessionStats(m.ID)
+		if sessions > 0 {
+			fmt.Printf(green+"│"+reset+"   Stats: %s%d sessions, %d min, %d blocks%s\n",
+				dim, sessions, minutes, blocks, reset)
+		}
+		fmt.Println(green + "│" + reset)
+	}
+
+	fmt.Println(green + "│" + reset + " " + dim + "Use /start <name> to begin a session" + reset)
+	fmt.Println(green + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// startFocusSession activates a focus mode.
+func (t *TUI) startFocusSession(ctx context.Context, nameOrID string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	modes, err := t.store.ListFocusModes()
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	// Find matching mode
+	var match *storage.FocusModeRecord
+	nameOrIDLower := strings.ToLower(nameOrID)
+	for _, m := range modes {
+		if strings.ToLower(m.Name) == nameOrIDLower ||
+			strings.HasPrefix(m.ID, nameOrID) {
+			match = &m
+			break
+		}
+	}
+
+	if match == nil {
+		fmt.Printf(yellow+"No focus mode found matching '%s'%s\n", nameOrID, reset)
+		fmt.Println(dim + "Use /modes to see available modes" + reset)
+		return
+	}
+
+	// Convert to FocusMode
+	mode := &focus.FocusMode{
+		ID:              match.ID,
+		Name:            match.Name,
+		Purpose:         match.Purpose,
+		AllowedApps:     focus.UnmarshalStringSlice(match.AllowedApps),
+		BlockedApps:     focus.UnmarshalStringSlice(match.BlockedApps),
+		BlockedPatterns: focus.UnmarshalStringSlice(match.BlockedPatterns),
+		AllowedSites:    focus.UnmarshalStringSlice(match.AllowedSites),
+		BrowserPolicy:   match.BrowserPolicy,
+		DurationMinutes: match.DurationMinutes,
+		CreatedAt:       match.CreatedAt,
+	}
+
+	// Start session
+	sessionID, err := t.store.StartFocusSession(mode.ID)
+	if err != nil {
+		fmt.Printf(red+"Error starting session: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(green + "╭─" + reset + bold + " focus mode active " + reset + green + strings.Repeat("─", 38) + "╮" + reset)
+	fmt.Println(green + "│" + reset)
+	fmt.Printf(green+"│"+reset+" %s%s%s is now active!\n", bold+green, mode.Name, reset)
+	fmt.Println(green + "│" + reset)
+	fmt.Printf(green+"│"+reset+" Session ID: %s%d%s\n", dim, sessionID, reset)
+	fmt.Printf(green+"│"+reset+" Purpose: %s%s%s\n", dim, mode.Purpose, reset)
+	fmt.Println(green + "│" + reset)
+	fmt.Println(green + "│" + reset + " " + yellow + "The daemon will now enforce focus rules." + reset)
+	fmt.Println(green + "│" + reset + " " + yellow + "Distracting windows will be closed after 5s warning." + reset)
+	fmt.Println(green + "│" + reset)
+	fmt.Println(green + "│" + reset + " " + dim + "Use /stop to end the session" + reset)
+	fmt.Println(green + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+
+	// TODO: Signal daemon to start enforcer
+	// For now, the daemon will pick it up from the active session in DB
+}
+
+// stopFocusSession ends the current focus session.
+func (t *TUI) stopFocusSession(ctx context.Context) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	// Get active session
+	session, err := t.store.GetActiveFocusSession()
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	if session == nil {
+		fmt.Println(yellow + "No focus session currently active" + reset)
+		return
+	}
+
+	// End session
+	if err := t.store.EndFocusSession(session.ID); err != nil {
+		fmt.Printf(red+"Error ending session: %v%s\n", err, reset)
+		return
+	}
+
+	// Calculate duration
+	duration := time.Since(session.StartedAt)
+
+	// Get mode name
+	modeName := "Unknown"
+	if mode, err := t.store.GetFocusMode(session.ModeID); err == nil {
+		modeName = mode.Name
+	}
+
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " session ended " + reset + blue + strings.Repeat("─", 42) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Printf(blue+"│"+reset+" %s%s%s session complete.\n", bold, modeName, reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Printf(blue+"│"+reset+" Duration: %s%.0f minutes%s\n", cyan, duration.Minutes(), reset)
+	fmt.Printf(blue+"│"+reset+" Distractions blocked: %s%d%s\n", cyan, session.BlocksCount, reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// showFocusStatus shows the current focus mode status.
+func (t *TUI) showFocusStatus(ctx context.Context) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	session, err := t.store.GetActiveFocusSession()
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " focus status " + reset + blue + strings.Repeat("─", 43) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+
+	if session == nil {
+		fmt.Println(blue + "│" + reset + " " + dim + "No focus session active" + reset)
+		fmt.Println(blue + "│" + reset)
+		fmt.Println(blue + "│" + reset + " " + dim + "Use /mode to create a focus mode" + reset)
+		fmt.Println(blue + "│" + reset + " " + dim + "Use /start <name> to begin a session" + reset)
+	} else {
+		// Get mode details
+		mode, _ := t.store.GetFocusMode(session.ModeID)
+		modeName := "Unknown"
+		if mode != nil {
+			modeName = mode.Name
+		}
+
+		duration := time.Since(session.StartedAt)
+
+		fmt.Printf(blue+"│"+reset+" %s●%s %s%s%s is active\n", green, reset, bold+green, modeName, reset)
+		fmt.Println(blue + "│" + reset)
+		fmt.Printf(blue+"│"+reset+" Started: %s%s%s\n", dim, session.StartedAt.Format("15:04"), reset)
+		fmt.Printf(blue+"│"+reset+" Duration: %s%.0f minutes%s\n", cyan, duration.Minutes(), reset)
+		fmt.Printf(blue+"│"+reset+" Blocks: %s%d%s\n", cyan, session.BlocksCount, reset)
+		fmt.Println(blue + "│" + reset)
+		fmt.Println(blue + "│" + reset + " " + dim + "Use /stop to end the session" + reset)
+	}
+
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

@@ -24,6 +24,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/screen"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/window"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/focus"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/insights"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
@@ -54,6 +55,10 @@ type Manager struct {
 
 	// Proactive insight engine
 	insightEngine *insights.Engine
+
+	// Focus mode enforcer
+	focusEnforcer *focus.Enforcer
+	apiKey        string
 
 	// Biometrics trackers (high-frequency)
 	mouseTracker    *biometrics.MouseTracker
@@ -134,6 +139,13 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		LLMModel:       "deepseek/deepseek-chat", // Cheap model for batch analysis
 	})
 
+	// Create focus mode enforcer
+	var focusEnforcer *focus.Enforcer
+	if apiKey != "" {
+		focusEnforcer = focus.NewEnforcer(store, apiKey, "deepseek/deepseek-chat")
+		log.Println("[focus] Focus mode enforcer enabled")
+	}
+
 	return &Manager{
 		cfg:                cfg,
 		platform:           plat,
@@ -148,6 +160,8 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		ocrEngine:          ocrEngine,
 		integrations:       intMgr,
 		insightEngine:      insightEngine,
+		focusEnforcer:      focusEnforcer,
+		apiKey:             apiKey,
 		mouseTracker:       biometrics.NewMouseTracker(plat, analyzer),
 		keyboardTracker:    biometrics.NewKeyboardTracker(plat, analyzer),
 	}
@@ -219,6 +233,12 @@ func (m *Manager) Start(ctx context.Context) {
 	// Start insight engine for proactive notifications
 	if m.insightEngine != nil {
 		m.insightEngine.Start(m.ctx)
+	}
+
+	// Start focus mode enforcer
+	if m.focusEnforcer != nil {
+		m.wg.Add(1)
+		go m.runFocusEnforcer()
 	}
 }
 
@@ -538,4 +558,84 @@ func (m *Manager) EnableAudio() {
 // DisableAudio disables audio capture.
 func (m *Manager) DisableAudio() {
 	m.audioCapturer.Disable()
+}
+
+// runFocusEnforcer starts the focus mode enforcement loop.
+func (m *Manager) runFocusEnforcer() {
+	defer m.wg.Done()
+
+	log.Println("[focus] Starting focus mode enforcer")
+
+	// Check for active focus sessions periodically
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			log.Println("[focus] Stopping focus mode enforcer")
+			return
+		case <-ticker.C:
+			m.checkFocusMode()
+		}
+	}
+}
+
+// checkFocusMode checks for active focus sessions and enforces them.
+func (m *Manager) checkFocusMode() {
+	// Get active session from database
+	session, err := m.store.GetActiveFocusSession()
+	if err != nil {
+		return
+	}
+
+	// If no active session
+	if session == nil {
+		// Stop enforcer if it was running
+		if m.focusEnforcer.IsActive() {
+			log.Println("[focus] Session ended, stopping enforcer")
+			m.focusEnforcer.Stop()
+		}
+		return
+	}
+
+	// If enforcer is already running with this session, continue
+	if m.focusEnforcer.IsActive() {
+		currentMode := m.focusEnforcer.GetCurrentMode()
+		if currentMode != nil && currentMode.ID == session.ModeID {
+			return
+		}
+	}
+
+	// Start enforcer with the new session
+	modeRecord, err := m.store.GetFocusMode(session.ModeID)
+	if err != nil {
+		log.Printf("[focus] Failed to get mode %s: %v", session.ModeID, err)
+		return
+	}
+
+	// Convert database record to FocusMode
+	mode := &focus.FocusMode{
+		ID:              modeRecord.ID,
+		Name:            modeRecord.Name,
+		Purpose:         modeRecord.Purpose,
+		AllowedApps:     focus.UnmarshalStringSlice(modeRecord.AllowedApps),
+		BlockedApps:     focus.UnmarshalStringSlice(modeRecord.BlockedApps),
+		BlockedPatterns: focus.UnmarshalStringSlice(modeRecord.BlockedPatterns),
+		AllowedSites:    focus.UnmarshalStringSlice(modeRecord.AllowedSites),
+		BrowserPolicy:   modeRecord.BrowserPolicy,
+		DurationMinutes: modeRecord.DurationMinutes,
+		CreatedAt:       modeRecord.CreatedAt,
+	}
+
+	log.Printf("[focus] Starting enforcer for mode: %s", mode.Name)
+
+	// Start the enforcer
+	if err := m.focusEnforcer.Start(mode); err != nil {
+		log.Printf("[focus] Failed to start enforcer: %v", err)
+		return
+	}
+
+	// Run the enforcer loop in a separate goroutine
+	go m.focusEnforcer.Run(m.ctx)
 }

@@ -114,6 +114,31 @@ func (s *Store) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_insights_type ON insights(insight_type);
 	CREATE INDEX IF NOT EXISTS idx_insights_created ON insights(created_at);
 	CREATE INDEX IF NOT EXISTS idx_insights_severity ON insights(severity);
+
+	CREATE TABLE IF NOT EXISTS focus_modes (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		purpose TEXT,
+		allowed_apps TEXT,
+		blocked_apps TEXT,
+		blocked_patterns TEXT,
+		allowed_sites TEXT,
+		browser_policy TEXT DEFAULT 'ask_llm',
+		duration_minutes INT DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE TABLE IF NOT EXISTS focus_sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		mode_id TEXT,
+		started_at DATETIME NOT NULL,
+		ended_at DATETIME,
+		blocks_count INT DEFAULT 0,
+		FOREIGN KEY (mode_id) REFERENCES focus_modes(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_focus_sessions_mode ON focus_sessions(mode_id);
+	CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_at);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -555,4 +580,177 @@ func (s *Store) SearchText(searchText string, limit int) ([]CaptureRecord, error
 	}
 
 	return records, nil
+}
+
+// FocusModeRecord represents a focus mode in the database.
+type FocusModeRecord struct {
+	ID              string
+	Name            string
+	Purpose         string
+	AllowedApps     string // JSON array
+	BlockedApps     string // JSON array
+	BlockedPatterns string // JSON array
+	AllowedSites    string // JSON array
+	BrowserPolicy   string
+	DurationMinutes int
+	CreatedAt       time.Time
+}
+
+// FocusSessionRecord represents a focus session in the database.
+type FocusSessionRecord struct {
+	ID          int64
+	ModeID      string
+	StartedAt   time.Time
+	EndedAt     *time.Time
+	BlocksCount int
+}
+
+// SaveFocusMode saves a focus mode to the database.
+func (s *Store) SaveFocusMode(mode *FocusModeRecord) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO focus_modes
+		(id, name, purpose, allowed_apps, blocked_apps, blocked_patterns,
+		 allowed_sites, browser_policy, duration_minutes, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, mode.ID, mode.Name, mode.Purpose, mode.AllowedApps, mode.BlockedApps,
+		mode.BlockedPatterns, mode.AllowedSites, mode.BrowserPolicy,
+		mode.DurationMinutes, mode.CreatedAt)
+	return err
+}
+
+// GetFocusMode retrieves a focus mode by ID.
+func (s *Store) GetFocusMode(id string) (*FocusModeRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, name, purpose, allowed_apps, blocked_apps, blocked_patterns,
+		       allowed_sites, browser_policy, duration_minutes, created_at
+		FROM focus_modes WHERE id = ?
+	`, id)
+
+	var m FocusModeRecord
+	var allowedApps, blockedApps, blockedPatterns, allowedSites sql.NullString
+	var purpose sql.NullString
+
+	err := row.Scan(&m.ID, &m.Name, &purpose, &allowedApps, &blockedApps,
+		&blockedPatterns, &allowedSites, &m.BrowserPolicy, &m.DurationMinutes, &m.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+
+	m.Purpose = purpose.String
+	m.AllowedApps = allowedApps.String
+	m.BlockedApps = blockedApps.String
+	m.BlockedPatterns = blockedPatterns.String
+	m.AllowedSites = allowedSites.String
+
+	return &m, nil
+}
+
+// ListFocusModes retrieves all focus modes.
+func (s *Store) ListFocusModes() ([]FocusModeRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, name, purpose, allowed_apps, blocked_apps, blocked_patterns,
+		       allowed_sites, browser_policy, duration_minutes, created_at
+		FROM focus_modes ORDER BY created_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var modes []FocusModeRecord
+	for rows.Next() {
+		var m FocusModeRecord
+		var allowedApps, blockedApps, blockedPatterns, allowedSites sql.NullString
+		var purpose sql.NullString
+
+		err := rows.Scan(&m.ID, &m.Name, &purpose, &allowedApps, &blockedApps,
+			&blockedPatterns, &allowedSites, &m.BrowserPolicy, &m.DurationMinutes, &m.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+
+		m.Purpose = purpose.String
+		m.AllowedApps = allowedApps.String
+		m.BlockedApps = blockedApps.String
+		m.BlockedPatterns = blockedPatterns.String
+		m.AllowedSites = allowedSites.String
+
+		modes = append(modes, m)
+	}
+
+	return modes, nil
+}
+
+// DeleteFocusMode deletes a focus mode by ID.
+func (s *Store) DeleteFocusMode(id string) error {
+	_, err := s.db.Exec("DELETE FROM focus_modes WHERE id = ?", id)
+	return err
+}
+
+// StartFocusSession starts a new focus session.
+func (s *Store) StartFocusSession(modeID string) (int64, error) {
+	res, err := s.db.Exec(`
+		INSERT INTO focus_sessions (mode_id, started_at)
+		VALUES (?, CURRENT_TIMESTAMP)
+	`, modeID)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// EndFocusSession ends a focus session.
+func (s *Store) EndFocusSession(sessionID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions SET ended_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, sessionID)
+	return err
+}
+
+// IncrementFocusSessionBlocks increments the block count for a session.
+func (s *Store) IncrementFocusSessionBlocks(sessionID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions SET blocks_count = blocks_count + 1 WHERE id = ?
+	`, sessionID)
+	return err
+}
+
+// GetActiveFocusSession returns the currently active session if any.
+func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
+	row := s.db.QueryRow(`
+		SELECT id, mode_id, started_at, ended_at, blocks_count
+		FROM focus_sessions
+		WHERE ended_at IS NULL
+		ORDER BY started_at DESC LIMIT 1
+	`)
+
+	var session FocusSessionRecord
+	var endedAt sql.NullTime
+
+	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if endedAt.Valid {
+		session.EndedAt = &endedAt.Time
+	}
+
+	return &session, nil
+}
+
+// GetFocusSessionStats returns statistics for focus sessions.
+func (s *Store) GetFocusSessionStats(modeID string) (totalSessions int, totalMinutes int, totalBlocks int, err error) {
+	row := s.db.QueryRow(`
+		SELECT COUNT(*),
+		       COALESCE(SUM(CAST((julianday(COALESCE(ended_at, CURRENT_TIMESTAMP)) - julianday(started_at)) * 24 * 60 AS INTEGER)), 0),
+		       COALESCE(SUM(blocks_count), 0)
+		FROM focus_sessions WHERE mode_id = ?
+	`, modeID)
+
+	err = row.Scan(&totalSessions, &totalMinutes, &totalBlocks)
+	return
 }

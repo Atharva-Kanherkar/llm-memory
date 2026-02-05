@@ -12,6 +12,7 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 - **Git Activity** — Monitors your repositories, branches, and commits
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
 - **Proactive Assistant** — Desktop notifications for stress spikes, context reminders, and periodic AI insights (~$2.50/month)
+- **Focus Mode** — AI-powered distraction blocker with visual window borders and smart browser tab detection
 - **External Integrations** — Connect to Gmail, Slack, and Google Calendar for comprehensive memory
 - **Natural Language Queries** — Ask questions like "What was I working on this morning?"
 - **Streaming Responses** — Real-time AI responses with animated loading
@@ -80,6 +81,11 @@ Start the interactive TUI:
 | `/stress` | Show stress/anxiety patterns |
 | `/alerts` | View proactive insights |
 | `/trigger` | Generate insights now |
+| `/mode` | Create a new focus mode (AI conversation) |
+| `/modes` | List saved focus modes |
+| `/start <name>` | Start a focus session |
+| `/stop` | End focus session |
+| `/status` | Show current focus mode status |
 | `/model [id]` | List or change AI model |
 | `/privacy` | View privacy settings |
 | `/exclude <app>` | Block an app from capture |
@@ -284,6 +290,7 @@ mnemosyne/
 │   │   ├── activity/    # Idle detection
 │   │   └── biometrics/  # Stress detection
 │   ├── daemon/          # Background daemon manager
+│   ├── focus/           # AI-powered focus mode & distraction blocking
 │   ├── storage/         # SQLite storage
 │   ├── query/           # Query engine
 │   ├── llm/             # OpenRouter LLM client
@@ -383,6 +390,80 @@ insights:
   context_reminders: true
   llm_model: deepseek/deepseek-chat
 ```
+
+## Focus Mode
+
+AI-powered distraction blocker that helps you stay focused by automatically closing distracting apps and browser tabs.
+
+### How It Works
+
+1. **Create a mode** with `/mode` — Have a conversation with the AI about what you're doing
+2. **AI builds rules** — Based on your description, it determines allowed/blocked apps and sites
+3. **Visual feedback** — Window borders glow green (allowed) or red (blocked)
+4. **Smart enforcement** — Distracting windows get a 5-second warning with pulsing red border, then close
+
+### Creating a Focus Mode
+
+```
+/mode
+
+AI: What will you be doing in this focus session?
+You: Studying algorithms using textbooks, Claude, and VS Code
+
+AI: Which apps do you need?
+You: VS Code, Firefox for Claude and docs, Zathura for PDFs
+
+AI: What distractions should I block?
+You: YouTube, Reddit, Twitter, Discord
+
+AI: How long will this session be?
+You: 2 hours
+
+✓ Focus mode "Study Mode" created!
+```
+
+### Visual Indicators
+
+| State | Border Color | Description |
+|-------|--------------|-------------|
+| Allowed | 🟢 Green | Window is allowed in focus mode |
+| Warning | 🟠 Orange | Distraction detected, 5s countdown |
+| Blocking | 🔴 Red pulse | About to close |
+
+### Browser Tab Handling
+
+Focus mode is smart about browsers:
+- **Closes just the tab** (Ctrl+W), not the whole browser
+- **Checks tab titles** against allowed sites and blocked patterns
+- **Asks AI** for ambiguous tabs ("Is this aligned with studying algorithms?")
+- **Caches decisions** so repeated tabs don't cost extra
+
+### Requirements
+
+```bash
+# For closing browser tabs (Wayland)
+sudo pacman -S wtype
+```
+
+### Commands
+
+```bash
+/mode          # Create new focus mode via AI conversation
+/modes         # List saved modes
+/start <name>  # Start a focus session
+/stop          # End session (shows stats)
+/status        # Current mode and blocks count
+```
+
+### Cost
+
+| Operation | Cost |
+|-----------|------|
+| Tab check (DeepSeek) | ~$0.001 per unique tab |
+| Mode creation | ~$0.01 |
+| Heavy daily use | ~$0.10 |
+
+Tab decisions are cached, so visiting the same site multiple times costs nothing extra.
 
 ## Models
 

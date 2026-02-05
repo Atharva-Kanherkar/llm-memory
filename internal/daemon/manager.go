@@ -12,6 +12,7 @@ package daemon
 import (
 	"context"
 	"log"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/screen"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/window"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/insights"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
@@ -49,6 +51,9 @@ type Manager struct {
 
 	// External integrations (Gmail, Slack, Calendar)
 	integrations *integrations.Manager
+
+	// Proactive insight engine
+	insightEngine *insights.Engine
 
 	// Biometrics trackers (high-frequency)
 	mouseTracker    *biometrics.MouseTracker
@@ -118,6 +123,17 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		}
 	}
 
+	// Create insight engine for proactive notifications
+	socketPath := filepath.Join(cfg.StoragePath, "mnemosyne.sock")
+	insightEngine := insights.NewEngine(insights.EngineConfig{
+		Store:          store,
+		SocketPath:     socketPath,
+		DesktopEnabled: true,
+		BatchInterval:  30 * time.Minute,
+		LLMAPIKey:      apiKey,
+		LLMModel:       "deepseek/deepseek-chat", // Cheap model for batch analysis
+	})
+
 	return &Manager{
 		cfg:                cfg,
 		platform:           plat,
@@ -131,6 +147,7 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		biometricsCapturer: bioCapturer,
 		ocrEngine:          ocrEngine,
 		integrations:       intMgr,
+		insightEngine:      insightEngine,
 		mouseTracker:       biometrics.NewMouseTracker(plat, analyzer),
 		keyboardTracker:    biometrics.NewKeyboardTracker(plat, analyzer),
 	}
@@ -198,6 +215,11 @@ func (m *Manager) Start(ctx context.Context) {
 		m.wg.Add(1)
 		go m.runCaptureLoop("integrations", intervals.Integrations, m.captureIntegrations)
 	}
+
+	// Start insight engine for proactive notifications
+	if m.insightEngine != nil {
+		m.insightEngine.Start(m.ctx)
+	}
 }
 
 // Stop gracefully stops all capture loops.
@@ -210,6 +232,11 @@ func (m *Manager) Stop() {
 	}
 	if m.keyboardTracker != nil {
 		m.keyboardTracker.Stop()
+	}
+
+	// Stop insight engine
+	if m.insightEngine != nil {
+		m.insightEngine.Stop()
 	}
 
 	// Close integrations manager
@@ -266,6 +293,11 @@ func (m *Manager) captureWindow() error {
 	// Record window switch for biometrics/stress analysis
 	if m.biometricsCapturer != nil {
 		m.biometricsCapturer.GetAnalyzer().RecordWindowSwitch()
+	}
+
+	// Process through insight engine for context tracking
+	if m.insightEngine != nil {
+		m.insightEngine.ProcessCapture(result, nil)
 	}
 
 	// Log the change
@@ -368,6 +400,11 @@ func (m *Manager) captureActivity() error {
 		return err
 	}
 
+	// Process through insight engine for idle detection
+	if m.insightEngine != nil {
+		m.insightEngine.ProcessCapture(result, nil)
+	}
+
 	// Only log state changes or periodically
 	// For now, just track without logging every time
 	if m.store != nil {
@@ -409,6 +446,12 @@ func (m *Manager) captureBiometrics() error {
 		if result.TextData != "" {
 			log.Printf("[biometrics] %s", result.TextData)
 		}
+	}
+
+	// Process through insight engine for proactive alerts
+	if m.insightEngine != nil {
+		snapshot := m.biometricsCapturer.GetAnalyzer().Analyze()
+		m.insightEngine.ProcessCapture(result, snapshot)
 	}
 
 	if m.store != nil {

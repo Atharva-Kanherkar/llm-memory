@@ -93,6 +93,27 @@ func (s *Store) initSchema() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);
+
+	CREATE TABLE IF NOT EXISTS insights (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		insight_type TEXT NOT NULL,
+		severity TEXT NOT NULL,
+		title TEXT NOT NULL,
+		body TEXT NOT NULL,
+		trigger_source TEXT,
+		related_captures TEXT,
+		metadata JSON,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		time_range_start DATETIME,
+		time_range_end DATETIME,
+		acknowledged_at DATETIME,
+		notified_desktop INTEGER DEFAULT 0,
+		notified_tui INTEGER DEFAULT 0
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_insights_type ON insights(insight_type);
+	CREATE INDEX IF NOT EXISTS idx_insights_created ON insights(created_at);
+	CREATE INDEX IF NOT EXISTS idx_insights_severity ON insights(severity);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -351,4 +372,187 @@ type Stats struct {
 	BySource      map[string]int64
 	DatabaseSize  int64
 	DataSize      int64
+}
+
+// InsightRecord represents an insight stored in the database.
+type InsightRecord struct {
+	ID              int64
+	Type            string
+	Severity        string
+	Title           string
+	Body            string
+	TriggerSource   string
+	RelatedCaptures []int64
+	Metadata        map[string]any
+	CreatedAt       time.Time
+	TimeRangeStart  *time.Time
+	TimeRangeEnd    *time.Time
+	AcknowledgedAt  *time.Time
+	NotifiedDesktop bool
+	NotifiedTUI     bool
+}
+
+// SaveInsight stores an insight in the database.
+func (s *Store) SaveInsight(insight *InsightRecord) (int64, error) {
+	var metadataJSON, relatedJSON []byte
+	var err error
+
+	if insight.Metadata != nil {
+		metadataJSON, err = json.Marshal(insight.Metadata)
+		if err != nil {
+			return 0, fmt.Errorf("failed to serialize metadata: %w", err)
+		}
+	}
+
+	if len(insight.RelatedCaptures) > 0 {
+		relatedJSON, err = json.Marshal(insight.RelatedCaptures)
+		if err != nil {
+			return 0, fmt.Errorf("failed to serialize related captures: %w", err)
+		}
+	}
+
+	res, err := s.db.Exec(`
+		INSERT INTO insights
+		(insight_type, severity, title, body, trigger_source, related_captures, metadata, time_range_start, time_range_end)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, insight.Type, insight.Severity, insight.Title, insight.Body,
+		insight.TriggerSource, string(relatedJSON), string(metadataJSON),
+		insight.TimeRangeStart, insight.TimeRangeEnd)
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to insert insight: %w", err)
+	}
+
+	return res.LastInsertId()
+}
+
+// GetRecentInsights retrieves recent unacknowledged insights.
+func (s *Store) GetRecentInsights(limit int) ([]InsightRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, insight_type, severity, title, body, trigger_source,
+		       related_captures, metadata, created_at, time_range_start,
+		       time_range_end, acknowledged_at, notified_desktop, notified_tui
+		FROM insights
+		WHERE acknowledged_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// GetInsightsByTimeRange retrieves insights within a time range.
+func (s *Store) GetInsightsByTimeRange(start, end time.Time) ([]InsightRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, insight_type, severity, title, body, trigger_source,
+		       related_captures, metadata, created_at, time_range_start,
+		       time_range_end, acknowledged_at, notified_desktop, notified_tui
+		FROM insights
+		WHERE created_at BETWEEN ? AND ?
+		ORDER BY created_at DESC
+	`, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return s.scanInsights(rows)
+}
+
+// AcknowledgeInsight marks an insight as acknowledged.
+func (s *Store) AcknowledgeInsight(id int64) error {
+	_, err := s.db.Exec(`
+		UPDATE insights SET acknowledged_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, id)
+	return err
+}
+
+// MarkInsightNotified updates notification status.
+func (s *Store) MarkInsightNotified(id int64, desktop, tui bool) error {
+	_, err := s.db.Exec(`
+		UPDATE insights SET notified_desktop = ?, notified_tui = ? WHERE id = ?
+	`, desktop, tui, id)
+	return err
+}
+
+func (s *Store) scanInsights(rows *sql.Rows) ([]InsightRecord, error) {
+	var records []InsightRecord
+	for rows.Next() {
+		var r InsightRecord
+		var relatedJSON, metadataJSON sql.NullString
+		var triggerSource sql.NullString
+		var timeRangeStart, timeRangeEnd, acknowledgedAt sql.NullTime
+
+		err := rows.Scan(&r.ID, &r.Type, &r.Severity, &r.Title, &r.Body,
+			&triggerSource, &relatedJSON, &metadataJSON, &r.CreatedAt,
+			&timeRangeStart, &timeRangeEnd, &acknowledgedAt,
+			&r.NotifiedDesktop, &r.NotifiedTUI)
+		if err != nil {
+			return nil, err
+		}
+
+		r.TriggerSource = triggerSource.String
+		if timeRangeStart.Valid {
+			r.TimeRangeStart = &timeRangeStart.Time
+		}
+		if timeRangeEnd.Valid {
+			r.TimeRangeEnd = &timeRangeEnd.Time
+		}
+		if acknowledgedAt.Valid {
+			r.AcknowledgedAt = &acknowledgedAt.Time
+		}
+
+		if relatedJSON.Valid && relatedJSON.String != "" {
+			json.Unmarshal([]byte(relatedJSON.String), &r.RelatedCaptures)
+		}
+		if metadataJSON.Valid && metadataJSON.String != "" {
+			json.Unmarshal([]byte(metadataJSON.String), &r.Metadata)
+		}
+
+		records = append(records, r)
+	}
+
+	return records, nil
+}
+
+// SearchText searches captures by text content.
+func (s *Store) SearchText(searchText string, limit int) ([]CaptureRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, timestamp, text_data, raw_data_path, metadata
+		FROM captures
+		WHERE text_data LIKE ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, "%"+searchText+"%", limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []CaptureRecord
+	for rows.Next() {
+		var r CaptureRecord
+		var metadataJSON string
+		var rawDataPath, textData sql.NullString
+
+		err := rows.Scan(&r.ID, &r.Source, &r.Timestamp, &textData, &rawDataPath, &metadataJSON)
+		if err != nil {
+			return nil, err
+		}
+
+		r.TextData = textData.String
+		r.RawDataPath = rawDataPath.String
+
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &r.Metadata)
+		}
+
+		records = append(records, r)
+	}
+
+	return records, nil
 }

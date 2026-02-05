@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -17,9 +18,11 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/llm"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/notify"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/oauth"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/query"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
 )
 
 // ANSI colors for easy access
@@ -170,6 +173,10 @@ type TUI struct {
 	cfg          *config.Config
 	debug        bool
 	integrations *integrations.Manager
+	store        *storage.Store
+	socketClient *notify.SocketClient
+	pendingAlert *storage.InsightRecord
+	alertMu      sync.Mutex
 }
 
 // toggleDebug enables or disables debug logging.
@@ -201,6 +208,14 @@ func NewTUI(db *sql.DB, apiKey string) *TUI {
 	integrationsDir := filepath.Join(homeDir, ".local", "share", "mnemosyne")
 	intMgr, _ := integrations.NewManager(integrationsDir)
 
+	// Initialize storage for insights
+	store, _ := storage.New(integrationsDir)
+
+	// Try to connect to daemon's socket for real-time alerts
+	socketPath := filepath.Join(integrationsDir, "mnemosyne.sock")
+	socketClient := notify.NewSocketClient()
+	socketClient.Connect(socketPath) // Best effort, may fail if daemon not running
+
 	return &TUI{
 		engine:       query.NewWithOCR(db, llmClient, apiKey),
 		reader:       bufio.NewReader(os.Stdin),
@@ -209,6 +224,8 @@ func NewTUI(db *sql.DB, apiKey string) *TUI {
 		db:           db,
 		cfg:          cfg,
 		integrations: intMgr,
+		store:        store,
+		socketClient: socketClient,
 	}
 }
 
@@ -277,6 +294,8 @@ func (t *TUI) printWelcome() {
 	fmt.Println(green + "    /search" + reset + dim + "    search by text" + reset)
 	fmt.Println(yellow + "    /summary" + reset + dim + "   AI summary of activity" + reset)
 	fmt.Println(yellow + "    /stress" + reset + dim + "    stress/anxiety patterns" + reset)
+	fmt.Println(yellow + "    /alerts" + reset + dim + "    proactive insights" + reset)
+	fmt.Println(yellow + "    /trigger" + reset + dim + "   generate insights now" + reset)
 	fmt.Println(blue + "    /model" + reset + dim + "     list or change AI model" + reset)
 	fmt.Println()
 	fmt.Println(bold + cyan + "  Integrations:" + reset)
@@ -418,6 +437,12 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 
 	case "/backfill":
 		t.backfillOCR(ctx)
+
+	case "/alerts", "/insights":
+		t.showAlerts(ctx)
+
+	case "/trigger":
+		t.triggerInsights(ctx)
 
 	default:
 		fmt.Printf(red+"Unknown command: %s\n"+reset, cmd)
@@ -1431,6 +1456,249 @@ func (t *TUI) backfillOCR(ctx context.Context) {
 		fmt.Printf(yellow+"✗ Failed: %d%s\n", failed, reset)
 	}
 	fmt.Println(dim + "Future queries will be much faster!" + reset)
+}
+
+// triggerInsights manually runs LLM analysis on recent activity.
+func (t *TUI) triggerInsights(ctx context.Context) {
+	if t.apiKey == "" {
+		fmt.Println(red + "Error: No API key configured" + reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(yellow + "╭─" + reset + bold + " generating insights " + reset + yellow + strings.Repeat("─", 36) + "╮" + reset)
+	fmt.Println(yellow + "│" + reset)
+	fmt.Println(yellow + "│" + reset + " " + dim + "Analyzing your recent activity..." + reset)
+	fmt.Println(yellow + "│" + reset)
+
+	spinner := NewSpinner()
+	spinner.Start("Running LLM analysis")
+
+	// Get recent captures (last hour)
+	end := time.Now()
+	start := end.Add(-1 * time.Hour)
+
+	records, err := t.engine.GetByTimeRange(ctx, start, end)
+	if err != nil {
+		spinner.Stop()
+		fmt.Printf(yellow+"│"+reset+" "+red+"Error: %v%s\n", err, reset)
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	if len(records) == 0 {
+		spinner.Stop()
+		fmt.Println(yellow + "│" + reset + " " + dim + "No recent activity to analyze." + reset)
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	// Build context for LLM
+	contextStr := t.buildInsightContext(records)
+
+	// Call LLM for insights
+	insights, err := t.generateInsights(ctx, contextStr)
+	spinner.Stop()
+
+	if err != nil {
+		fmt.Printf(yellow+"│"+reset+" "+red+"Error: %v%s\n", err, reset)
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	if len(insights) == 0 {
+		fmt.Println(yellow + "│" + reset + " " + dim + "No significant insights detected." + reset)
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	// Display insights
+	for _, insight := range insights {
+		var icon string
+		switch insight.Severity {
+		case "warning":
+			icon = "🟡"
+		default:
+			icon = "🔵"
+		}
+		fmt.Printf(yellow+"│"+reset+" %s %s%s%s\n", icon, bold, insight.Title, reset)
+		fmt.Printf(yellow+"│"+reset+"   %s%s%s\n", dim, insight.Body, reset)
+		fmt.Println(yellow + "│" + reset)
+
+		// Save to database
+		if t.store != nil {
+			t.store.SaveInsight(&storage.InsightRecord{
+				Type:          insight.Type,
+				Severity:      insight.Severity,
+				Title:         insight.Title,
+				Body:          insight.Body,
+				TriggerSource: "manual",
+			})
+		}
+	}
+
+	fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+type manualInsight struct {
+	Type     string
+	Title    string
+	Body     string
+	Severity string
+}
+
+func (t *TUI) buildInsightContext(records []query.CaptureRecord) string {
+	var sb strings.Builder
+	sb.WriteString("Activity from the last hour:\n\n")
+
+	// Group by source
+	bySource := make(map[string][]query.CaptureRecord)
+	for _, r := range records {
+		bySource[r.Source] = append(bySource[r.Source], r)
+	}
+
+	if windows := bySource["window"]; len(windows) > 0 {
+		sb.WriteString("APPS:\n")
+		seen := make(map[string]bool)
+		for _, w := range windows {
+			app := w.Metadata["app_class"]
+			if app != "" && !seen[app] {
+				seen[app] = true
+				sb.WriteString(fmt.Sprintf("- %s\n", app))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	if bio := bySource["biometrics"]; len(bio) > 0 {
+		sb.WriteString("STRESS:\n")
+		for _, b := range bio {
+			level := b.Metadata["stress_level"]
+			score := b.Metadata["stress_score"]
+			if level != "" {
+				sb.WriteString(fmt.Sprintf("- %s: %s (score: %s)\n", b.Timestamp.Format("15:04"), level, score))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	if screens := bySource["screen"]; len(screens) > 0 {
+		sb.WriteString("SCREEN:\n")
+		count := 0
+		for _, s := range screens {
+			if s.TextData != "" && count < 3 {
+				text := s.TextData
+				if len(text) > 100 {
+					text = text[:97] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("- %s: %s\n", s.Timestamp.Format("15:04"), text))
+				count++
+			}
+		}
+	}
+
+	return sb.String()
+}
+
+func (t *TUI) generateInsights(ctx context.Context, contextStr string) ([]manualInsight, error) {
+	prompt := fmt.Sprintf(`Analyze this activity and generate 1-3 insights. Output JSON only.
+
+%s
+
+Output format:
+[{"type": "pattern|summary", "title": "short title", "body": "insight (max 100 chars)", "severity": "info|warning"}]
+
+Focus on: work patterns, stress correlations, productivity. Be specific. Output ONLY valid JSON.`, contextStr)
+
+	// Use the LLM client directly
+	if t.llmClient == nil {
+		return nil, fmt.Errorf("no LLM client")
+	}
+
+	// Temporarily switch to cheap model for insights
+	originalModel := t.llmClient.ChatModel
+	t.llmClient.ChatModel = "deepseek/deepseek-chat"
+	defer func() { t.llmClient.ChatModel = originalModel }()
+
+	response, err := t.llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON response
+	content := strings.TrimSpace(response)
+	startIdx := strings.Index(content, "[")
+	endIdx := strings.LastIndex(content, "]")
+	if startIdx >= 0 && endIdx > startIdx {
+		content = content[startIdx : endIdx+1]
+	}
+
+	var insights []manualInsight
+	if err := json.Unmarshal([]byte(content), &insights); err != nil {
+		return nil, fmt.Errorf("failed to parse LLM response")
+	}
+
+	return insights, nil
+}
+
+// showAlerts displays recent proactive insights from the daemon.
+func (t *TUI) showAlerts(ctx context.Context) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	insights, err := t.store.GetRecentInsights(20)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(yellow + "╭─" + reset + bold + " proactive insights " + reset + yellow + strings.Repeat("─", 37) + "╮" + reset)
+
+	if len(insights) == 0 {
+		fmt.Println(yellow + "│" + reset)
+		fmt.Println(yellow + "│" + reset + " " + dim + "No insights yet." + reset)
+		fmt.Println(yellow + "│" + reset + " " + dim + "The daemon generates insights based on your activity." + reset)
+		fmt.Println(yellow + "│" + reset)
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	fmt.Println(yellow + "│" + reset)
+	for _, i := range insights {
+		// Severity icon
+		var icon, severityColor string
+		switch i.Severity {
+		case "urgent":
+			icon = "🔴"
+			severityColor = red
+		case "warning":
+			icon = "🟡"
+			severityColor = yellow
+		default:
+			icon = "🔵"
+			severityColor = blue
+		}
+
+		// Format timestamp
+		ts := i.CreatedAt.Format("15:04")
+		if i.CreatedAt.Day() != time.Now().Day() {
+			ts = i.CreatedAt.Format("Jan 02 15:04")
+		}
+
+		fmt.Printf(yellow+"│"+reset+" %s %s%s%s\n", icon, severityColor+bold, i.Title, reset)
+		fmt.Printf(yellow+"│"+reset+"   %s%s%s\n", dim, i.Body, reset)
+		fmt.Printf(yellow+"│"+reset+"   %s%s • %s%s\n", dim, ts, i.Type, reset)
+		fmt.Println(yellow + "│" + reset)
+	}
+
+	fmt.Println(yellow + "│" + reset + " " + dim + "Insights are generated from stress patterns, context," + reset)
+	fmt.Println(yellow + "│" + reset + " " + dim + "and periodic LLM analysis of your activity." + reset)
+	fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

@@ -25,7 +25,18 @@ type Config struct {
 	BlockedKeywords []string `yaml:"blocked_keywords"`
 	Paused          bool     `yaml:"paused"`
 
-	LLM LLMConfig `yaml:"llm"`
+	LLM      LLMConfig      `yaml:"llm"`
+	Insights InsightsConfig `yaml:"insights"`
+}
+
+// InsightsConfig holds settings for proactive insights.
+type InsightsConfig struct {
+	Enabled              bool `yaml:"enabled"`
+	DesktopNotifications bool `yaml:"desktop_notifications"`
+	BatchIntervalMinutes int  `yaml:"batch_interval_minutes"`
+	StressAlertsEnabled  bool `yaml:"stress_alerts_enabled"`
+	ContextReminders     bool `yaml:"context_reminders"`
+	LLMModel             string `yaml:"llm_model"`
 }
 
 // LLMConfig holds settings for the LLM provider.
@@ -74,6 +85,15 @@ func DefaultConfig() *Config {
 			OpenRouterBase: "https://openrouter.ai/api/v1",
 			ChatModel:      "openai/gpt-4o-mini",
 			EmbeddingModel: "openai/text-embedding-3-small",
+		},
+
+		Insights: InsightsConfig{
+			Enabled:              true,
+			DesktopNotifications: true,
+			BatchIntervalMinutes: 30,
+			StressAlertsEnabled:  true,
+			ContextReminders:     true,
+			LLMModel:             "deepseek/deepseek-chat",
 		},
 	}
 }

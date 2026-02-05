@@ -11,6 +11,7 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 - **Clipboard History** — Tracks everything you copy
 - **Git Activity** — Monitors your repositories, branches, and commits
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
+- **Proactive Assistant** — Desktop notifications for stress spikes, context reminders, and periodic AI insights (~$2.50/month)
 - **External Integrations** — Connect to Gmail, Slack, and Google Calendar for comprehensive memory
 - **Natural Language Queries** — Ask questions like "What was I working on this morning?"
 - **Streaming Responses** — Real-time AI responses with animated loading
@@ -77,6 +78,8 @@ Start the interactive TUI:
 | `/search <text>` | Search captures by text |
 | `/summary [today\|hour\|day]` | AI summary of activity |
 | `/stress` | Show stress/anxiety patterns |
+| `/alerts` | View proactive insights |
+| `/trigger` | Generate insights now |
 | `/model [id]` | List or change AI model |
 | `/privacy` | View privacy settings |
 | `/exclude <app>` | Block an app from capture |
@@ -338,6 +341,48 @@ Mnemosyne analyzes behavioral patterns to detect stress:
 | Rapid switches (<5s) | < 10 | > 10 |
 
 Based on research from CMU and IEEE studies on keystroke dynamics.
+
+## Proactive Assistant
+
+Mnemosyne can proactively notify you about patterns in your activity:
+
+### Automatic Alerts
+
+| Alert Type | Trigger | Notification |
+|------------|---------|--------------|
+| Stress Spike | Score jumps >20 points in 2min | Desktop (urgent) |
+| Sustained Stress | High stress for 10+ minutes | Desktop (warning) |
+| Context Reminder | Return from 5+ min break | TUI (info) |
+| Deep Work | Focused on one app 30+ min | TUI (info) |
+
+### Periodic LLM Analysis
+
+Every 30 minutes, a cheap model (DeepSeek) analyzes your activity to detect:
+- Work patterns and fragmentation
+- Stress correlations with tasks/apps
+- Productivity observations
+
+**Cost**: ~$2.50/month for continuous analysis
+
+### Commands
+
+```bash
+/alerts     # View recent insights
+/trigger    # Generate insights now (manual)
+```
+
+### Configuration
+
+```yaml
+# ~/.config/mnemosyne/config.yaml
+insights:
+  enabled: true
+  desktop_notifications: true
+  batch_interval_minutes: 30
+  stress_alerts_enabled: true
+  context_reminders: true
+  llm_model: deepseek/deepseek-chat
+```
 
 ## Models
 

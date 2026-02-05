@@ -42,7 +42,8 @@ func (v *VisionOCR) Available() bool {
 	return v.apiKey != ""
 }
 
-// ExtractText extracts text from image bytes using vision model.
+// ExtractText extracts and COMPRESSES text from image bytes using vision model.
+// Instead of raw OCR, this returns a concise summary to save tokens.
 func (v *VisionOCR) ExtractText(ctx context.Context, imageData []byte) (string, error) {
 	if !v.Available() {
 		return "", fmt.Errorf("no API key configured")
@@ -51,7 +52,7 @@ func (v *VisionOCR) ExtractText(ctx context.Context, imageData []byte) (string, 
 	// Encode image as base64
 	b64Image := base64.StdEncoding.EncodeToString(imageData)
 
-	// Build the request with image
+	// Build the request with image - ask for COMPRESSED output
 	req := map[string]interface{}{
 		"model": v.model,
 		"messages": []map[string]interface{}{
@@ -60,15 +61,12 @@ func (v *VisionOCR) ExtractText(ctx context.Context, imageData []byte) (string, 
 				"content": []map[string]interface{}{
 					{
 						"type": "text",
-						"text": `Extract all visible text from this screenshot. Focus on:
-1. Window titles and application names
-2. Code or terminal content
-3. Any readable text in the UI
-4. Browser tabs or URLs if visible
+						"text": `Describe this screenshot in 2-3 sentences MAX. Include:
+- App name and what user is doing
+- Key visible text (file names, titles, important content)
+- Any code: just mention language and purpose, not full code
 
-Format the output clearly. If it's code, preserve the structure.
-If you can identify what the user is working on, mention it briefly.
-Keep response concise but complete.`,
+Be extremely concise. Example: "VSCode editing main.go - implementing HTTP server. Terminal shows 'go build' success."`,
 					},
 					{
 						"type": "image_url",
@@ -79,7 +77,7 @@ Keep response concise but complete.`,
 				},
 			},
 		},
-		"max_tokens": 1000,
+		"max_tokens": 200, // Much smaller - we want compression
 	}
 
 	body, err := json.Marshal(req)

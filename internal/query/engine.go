@@ -159,15 +159,54 @@ func (e *Engine) scanRecords(rows *sql.Rows) ([]CaptureRecord, error) {
 	return records, nil
 }
 
+// Context size limits to avoid token overflow
+const (
+	maxContextChars   = 30000 // ~7500 tokens max for context
+	maxScreenCaptures = 10   // Limit screenshots
+	maxOtherCaptures  = 50   // Limit other capture types
+	maxTextPerCapture = 500  // Truncate individual captures
+)
+
+// truncateText truncates text to maxLen characters with ellipsis.
+func truncateText(text string, maxLen int) string {
+	// Remove excessive whitespace first
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= maxLen {
+		return text
+	}
+	return text[:maxLen-3] + "..."
+}
+
 // BuildContext builds a text context from captures for LLM queries.
+// Optimized to stay within token limits.
 func (e *Engine) BuildContext(ctx context.Context, records []CaptureRecord, includeOCR bool) string {
 	var sb strings.Builder
 
-	// Limit OCR to 5 most recent screenshots to avoid long waits
+	// Count and limit by type
+	screenCount := 0
+	otherCount := 0
 	ocrCount := 0
 	const maxOCR = 5
 
 	for _, r := range records {
+		// Enforce limits
+		if r.Source == "screen" {
+			if screenCount >= maxScreenCaptures {
+				continue
+			}
+			screenCount++
+		} else {
+			if otherCount >= maxOtherCaptures {
+				continue
+			}
+			otherCount++
+		}
+
+		// Check total context size
+		if sb.Len() > maxContextChars {
+			sb.WriteString("\n[Context truncated to stay within token limits]\n")
+			break
+		}
 		timestamp := r.Timestamp.Format("2006-01-02 15:04:05")
 		sb.WriteString(fmt.Sprintf("\n[%s] %s:\n", timestamp, r.Source))
 
@@ -181,11 +220,7 @@ func (e *Engine) BuildContext(ctx context.Context, records []CaptureRecord, incl
 		case "clipboard":
 			contentType := r.Metadata["content_type"]
 			if r.TextData != "" {
-				// Truncate long clipboard content
-				text := r.TextData
-				if len(text) > 500 {
-					text = text[:500] + "..."
-				}
+				text := truncateText(r.TextData, maxTextPerCapture)
 				sb.WriteString(fmt.Sprintf("  Type: %s\n  Content: %s\n", contentType, text))
 			}
 
@@ -195,37 +230,26 @@ func (e *Engine) BuildContext(ctx context.Context, records []CaptureRecord, incl
 			commit := r.Metadata["commit"]
 			sb.WriteString(fmt.Sprintf("  Repo: %s\n  Branch: %s\n  Commit: %s\n", repo, branch, commit))
 			if r.TextData != "" {
-				// Include uncommitted changes summary
-				changes := r.TextData
-				if len(changes) > 300 {
-					changes = changes[:300] + "..."
-				}
+				changes := truncateText(r.TextData, 300)
 				sb.WriteString(fmt.Sprintf("  Changes: %s\n", changes))
 			}
 
 		case "screen":
-			// Check for pre-computed OCR text first
+			// Check for pre-computed OCR text first (already compressed)
 			if r.TextData != "" {
-				ocrText := r.TextData
-				if len(ocrText) > 2000 {
-					ocrText = ocrText[:2000] + "..."
-				}
-				sb.WriteString(fmt.Sprintf("  Screen content (pre-computed OCR):\n%s\n", ocrText))
+				ocrText := truncateText(r.TextData, maxTextPerCapture)
+				sb.WriteString(fmt.Sprintf("  Screen: %s\n", ocrText))
 			} else if includeOCR && r.RawDataPath != "" && ocrCount < maxOCR {
 				// Fall back to on-demand OCR for old screenshots without pre-computed text
 				ocrCount++
 				e.debugLog("Processing screenshot %d/%d (no pre-computed OCR)", ocrCount, maxOCR)
 				ocrText := e.getOCRText(ctx, r.RawDataPath)
 				if ocrText != "" {
-					if len(ocrText) > 2000 {
-						ocrText = ocrText[:2000] + "..."
-					}
-					sb.WriteString(fmt.Sprintf("  Screen content (vision OCR):\n%s\n", ocrText))
+					ocrText = truncateText(ocrText, maxTextPerCapture)
+					sb.WriteString(fmt.Sprintf("  Screen: %s\n", ocrText))
 				}
 			} else if r.RawDataPath != "" {
-				sb.WriteString("  [Screenshot captured - OCR skipped]\n")
-			} else {
-				sb.WriteString("  [Screenshot captured]\n")
+				sb.WriteString("  [Screenshot - no OCR]\n")
 			}
 
 		case "activity":
@@ -342,16 +366,23 @@ func (e *Engine) buildQueryContext(ctx context.Context, question string) (string
 	timeRange := e.parseTimeRange(question)
 	e.debugLog("Parsed time range: %v to %v", timeRange.start, timeRange.end)
 
-	// Get relevant captures
+	// Get relevant captures - limit to avoid token overflow
 	var records []CaptureRecord
 	var err error
 
+	// Limit fetched records to stay within token budget
+	const maxRecords = 60
+
 	if timeRange.start.IsZero() {
-		e.debugLog("No time range, fetching last 100 captures")
-		records, err = e.GetRecent(ctx, 100)
+		e.debugLog("No time range, fetching last %d captures", maxRecords)
+		records, err = e.GetRecent(ctx, maxRecords)
 	} else {
 		e.debugLog("Fetching captures in time range")
 		records, err = e.GetByTimeRange(ctx, timeRange.start, timeRange.end)
+		// Limit even time range queries
+		if len(records) > maxRecords {
+			records = records[:maxRecords]
+		}
 	}
 
 	if err != nil {

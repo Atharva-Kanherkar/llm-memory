@@ -7,13 +7,15 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 ## Features
 
 - **Window Tracking** — Captures active window titles and applications
-- **Screenshot OCR** — Takes periodic screenshots and extracts text using vision AI
+- **Screenshot OCR** — Takes periodic screenshots and extracts text using vision AI (pre-computed for instant queries)
 - **Clipboard History** — Tracks everything you copy
 - **Git Activity** — Monitors your repositories, branches, and commits
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
+- **External Integrations** — Connect to Gmail, Slack, and Google Calendar for comprehensive memory
 - **Natural Language Queries** — Ask questions like "What was I working on this morning?"
 - **Streaming Responses** — Real-time AI responses with animated loading
 - **Privacy Controls** — Block sensitive apps, URLs, and keywords from capture
+- **Encrypted OAuth Storage** — AES-256-GCM encrypted token storage with secure key management
 
 ## Installation
 
@@ -79,6 +81,9 @@ Start the interactive TUI:
 | `/privacy` | View privacy settings |
 | `/exclude <app>` | Block an app from capture |
 | `/clear [all\|today\|screen]` | Delete captured data |
+| `/auth` | Show connected integrations |
+| `/connect <provider>` | Connect Gmail, Slack, or Calendar |
+| `/logout <provider>` | Disconnect a service |
 | `/debug` | Toggle debug logging |
 | `/help` | Show help |
 | `/quit` | Exit |
@@ -165,6 +170,68 @@ llm:
   chat_model: openai/gpt-4o-mini
 ```
 
+## External Integrations
+
+Mnemosyne can connect to external services to capture more context about your activities.
+
+### Gmail
+
+Captures recent emails and unread count to help you remember communications.
+
+```bash
+# Set up Google OAuth
+export GOOGLE_CLIENT_ID="your-client-id"
+export GOOGLE_CLIENT_SECRET="your-client-secret"
+
+# In the TUI
+/connect gmail
+```
+
+### Slack
+
+Captures recent messages from channels you're a member of.
+
+```bash
+# Set up Slack OAuth
+export SLACK_CLIENT_ID="your-client-id"
+export SLACK_CLIENT_SECRET="your-client-secret"
+
+# In the TUI
+/connect slack
+```
+
+### Google Calendar
+
+Captures today's events and upcoming meetings.
+
+```bash
+# Uses same Google OAuth credentials as Gmail
+/connect calendar
+```
+
+### Security Notes
+
+- **All OAuth tokens are encrypted** with AES-256-GCM before storage
+- Encryption keys are generated using cryptographically secure random and stored with `0600` permissions
+- Tokens are **never logged** anywhere
+- OAuth callback server only listens on `127.0.0.1` (localhost)
+- CSRF protection via cryptographic state parameter
+
+### Setting Up OAuth Credentials
+
+**Google (Gmail/Calendar):**
+1. Go to [Google Cloud Console](https://console.cloud.google.com)
+2. Create a new project or select existing
+3. Enable Gmail API and Google Calendar API
+4. Create OAuth 2.0 credentials (Desktop application)
+5. Add `http://localhost:8085/callback` and `http://localhost:8086/callback` as redirect URIs
+
+**Slack:**
+1. Go to [Slack API](https://api.slack.com/apps)
+2. Create a new app
+3. Add OAuth scopes: `channels:history`, `channels:read`, `users:read`
+4. Add `http://localhost:8087/callback` as a redirect URL
+
 ## Architecture
 
 ```
@@ -175,7 +242,7 @@ mnemosyne/
 ├── internal/
 │   ├── capture/         # Data capture modules
 │   │   ├── window/      # Window tracking (Hyprland)
-│   │   ├── screen/      # Screenshot capture
+│   │   ├── screen/      # Screenshot capture + OCR
 │   │   ├── clipboard/   # Clipboard monitoring
 │   │   ├── git/         # Git repository tracking
 │   │   ├── activity/    # Idle detection
@@ -185,6 +252,8 @@ mnemosyne/
 │   ├── query/           # Query engine
 │   ├── llm/             # OpenRouter LLM client
 │   ├── ocr/             # Vision-based OCR
+│   ├── oauth/           # Secure OAuth 2.0 (encrypted tokens)
+│   ├── integrations/    # Gmail, Slack, Calendar clients
 │   └── config/          # Configuration
 ```
 

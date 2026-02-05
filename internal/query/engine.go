@@ -204,12 +204,19 @@ func (e *Engine) BuildContext(ctx context.Context, records []CaptureRecord, incl
 			}
 
 		case "screen":
-			if includeOCR && r.RawDataPath != "" && ocrCount < maxOCR {
+			// Check for pre-computed OCR text first
+			if r.TextData != "" {
+				ocrText := r.TextData
+				if len(ocrText) > 2000 {
+					ocrText = ocrText[:2000] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  Screen content (pre-computed OCR):\n%s\n", ocrText))
+			} else if includeOCR && r.RawDataPath != "" && ocrCount < maxOCR {
+				// Fall back to on-demand OCR for old screenshots without pre-computed text
 				ocrCount++
-				e.debugLog("Processing screenshot %d/%d", ocrCount, maxOCR)
+				e.debugLog("Processing screenshot %d/%d (no pre-computed OCR)", ocrCount, maxOCR)
 				ocrText := e.getOCRText(ctx, r.RawDataPath)
 				if ocrText != "" {
-					// Keep more OCR text for comprehensive context
 					if len(ocrText) > 2000 {
 						ocrText = ocrText[:2000] + "..."
 					}

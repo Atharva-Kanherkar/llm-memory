@@ -113,13 +113,19 @@ func runDaemon() {
 
 	log.Printf("Storage initialized at: %s", dataDir)
 
+	// Get API key for OCR pre-computation
+	apiKey := cfg.LLM.OpenRouterKey
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENROUTER_API_KEY")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	manager := daemon.NewManager(cfg, plat, store)
+	manager := daemon.NewManager(cfg, plat, store, apiKey)
 	manager.Start(ctx)
 
 	log.Println("Mnemosyne running. Press Ctrl+C to stop.")

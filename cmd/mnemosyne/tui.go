@@ -7,13 +7,17 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/llm"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/oauth"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/query"
 )
 
@@ -157,13 +161,14 @@ func (s *Spinner) animate() {
 
 // TUI provides an interactive terminal interface for querying captures.
 type TUI struct {
-	engine    *query.Engine
-	reader    *bufio.Reader
-	llmClient *llm.Client
-	apiKey    string
-	db        *sql.DB
-	cfg       *config.Config
-	debug     bool
+	engine       *query.Engine
+	reader       *bufio.Reader
+	llmClient    *llm.Client
+	apiKey       string
+	db           *sql.DB
+	cfg          *config.Config
+	debug        bool
+	integrations *integrations.Manager
 }
 
 // toggleDebug enables or disables debug logging.
@@ -190,13 +195,19 @@ func NewTUI(db *sql.DB, apiKey string) *TUI {
 
 	cfg, _ := config.Load()
 
+	// Initialize integrations manager
+	homeDir, _ := os.UserHomeDir()
+	integrationsDir := filepath.Join(homeDir, ".local", "share", "mnemosyne")
+	intMgr, _ := integrations.NewManager(integrationsDir)
+
 	return &TUI{
-		engine:    query.NewWithOCR(db, llmClient, apiKey),
-		reader:    bufio.NewReader(os.Stdin),
-		llmClient: llmClient,
-		apiKey:    apiKey,
-		db:        db,
-		cfg:       cfg,
+		engine:       query.NewWithOCR(db, llmClient, apiKey),
+		reader:       bufio.NewReader(os.Stdin),
+		llmClient:    llmClient,
+		apiKey:       apiKey,
+		db:           db,
+		cfg:          cfg,
+		integrations: intMgr,
 	}
 }
 
@@ -266,6 +277,11 @@ func (t *TUI) printWelcome() {
 	fmt.Println(yellow + "    /summary" + reset + dim + "   AI summary of activity" + reset)
 	fmt.Println(yellow + "    /stress" + reset + dim + "    stress/anxiety patterns" + reset)
 	fmt.Println(blue + "    /model" + reset + dim + "     list or change AI model" + reset)
+	fmt.Println()
+	fmt.Println(bold + cyan + "  Integrations:" + reset)
+	fmt.Println(blue + "    /auth" + reset + dim + "      show connected services" + reset)
+	fmt.Println(blue + "    /connect" + reset + dim + "   connect Gmail, Slack, Calendar" + reset)
+	fmt.Println(blue + "    /logout" + reset + dim + "    disconnect a service" + reset)
 	fmt.Println()
 	fmt.Println(bold + cyan + "  Privacy:" + reset)
 	fmt.Println(red + "    /privacy" + reset + dim + "   view privacy settings" + reset)
@@ -371,6 +387,24 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 			t.showExcluded()
 		} else {
 			t.excludeApp(args[0])
+		}
+
+	case "/auth", "/integrations":
+		t.showIntegrations()
+
+	case "/connect":
+		if len(args) == 0 {
+			t.showConnectHelp()
+		} else {
+			t.connectProvider(ctx, args[0])
+		}
+
+	case "/logout", "/disconnect":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /logout <provider>" + reset)
+			fmt.Println(dim + "Providers: gmail, slack, calendar" + reset)
+		} else {
+			t.logoutProvider(args[0])
 		}
 
 	default:
@@ -1017,6 +1051,181 @@ func (t *TUI) clearData(ctx context.Context, args []string) {
 	}
 
 	fmt.Printf(green+"✓ Deleted %d records%s\n", deleted, reset)
+}
+
+// showIntegrations shows the status of external service connections.
+func (t *TUI) showIntegrations() {
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " integrations " + reset + blue + strings.Repeat("─", 43) + "╮" + reset)
+
+	if t.integrations == nil {
+		fmt.Println(blue + "│" + reset + " " + red + "Integrations not initialized" + reset)
+		fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	status := t.integrations.GetProviderStatus()
+
+	providers := []struct {
+		name  string
+		key   string
+		icon  string
+		color string
+	}{
+		{"Gmail", oauth.ProviderGmail, "📧", yellow},
+		{"Slack", oauth.ProviderSlack, "💬", magenta},
+		{"Google Calendar", oauth.ProviderCalendar, "📅", cyan},
+	}
+
+	fmt.Println(blue + "│" + reset)
+	for _, p := range providers {
+		s := status[p.key]
+		statusIcon := red + "○" + reset
+		statusText := dim + "not connected" + reset
+
+		if !s["configured"] {
+			statusText = dim + "not configured (set env vars)" + reset
+		} else if s["authenticated"] {
+			statusIcon = green + "●" + reset
+			statusText = green + "connected" + reset
+		} else {
+			statusText = yellow + "ready to connect" + reset
+		}
+
+		fmt.Printf(blue+"│"+reset+" %s %s%-18s%s %s %s\n",
+			p.icon, p.color, p.name, reset, statusIcon, statusText)
+	}
+
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Environment Variables:" + reset)
+	fmt.Println(blue + "│" + reset + "   " + dim + "GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET" + reset)
+	fmt.Println(blue + "│" + reset + "   " + dim + "SLACK_CLIENT_ID, SLACK_CLIENT_SECRET" + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "Use /connect <provider> to authenticate" + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "Use /logout <provider> to disconnect" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// showConnectHelp shows help for the connect command.
+func (t *TUI) showConnectHelp() {
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " connect " + reset + blue + strings.Repeat("─", 48) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Usage:" + reset + " /connect <provider>")
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Providers:" + reset)
+	fmt.Println(blue + "│" + reset + "   " + yellow + "gmail" + reset + "     - Access your emails")
+	fmt.Println(blue + "│" + reset + "   " + magenta + "slack" + reset + "     - Access your Slack messages")
+	fmt.Println(blue + "│" + reset + "   " + cyan + "calendar" + reset + "  - Access your calendar events")
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "Example: /connect gmail" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// connectProvider starts the OAuth flow for a provider.
+func (t *TUI) connectProvider(ctx context.Context, provider string) {
+	if t.integrations == nil {
+		fmt.Println(red + "Error: Integrations not initialized" + reset)
+		return
+	}
+
+	// Normalize provider name
+	provider = strings.ToLower(provider)
+	switch provider {
+	case "gmail", "email", "mail":
+		provider = oauth.ProviderGmail
+	case "slack":
+		provider = oauth.ProviderSlack
+	case "calendar", "gcal", "google-calendar":
+		provider = oauth.ProviderCalendar
+	}
+
+	fmt.Println()
+	spinner := NewSpinner()
+	spinner.Start("Starting authentication")
+
+	authURL, err := t.integrations.AuthenticateProvider(ctx, provider)
+	spinner.Stop()
+
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " authentication " + reset + blue + strings.Repeat("─", 41) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + bold + "Opening browser for authentication..." + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "If browser doesn't open, visit:" + reset)
+	fmt.Println(blue + "│" + reset)
+
+	// Try to open browser
+	openBrowser(authURL)
+
+	// Show URL (but truncate for display)
+	displayURL := authURL
+	if len(displayURL) > 54 {
+		displayURL = displayURL[:51] + "..."
+	}
+	fmt.Println(blue + "│" + reset + " " + cyan + displayURL + reset)
+	fmt.Println(blue + "│" + reset)
+	fmt.Println(blue + "│" + reset + " " + yellow + "Waiting for authorization..." + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "(This window will update when complete)" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// logoutProvider removes authentication for a provider.
+func (t *TUI) logoutProvider(provider string) {
+	if t.integrations == nil {
+		fmt.Println(red + "Error: Integrations not initialized" + reset)
+		return
+	}
+
+	// Normalize provider name
+	provider = strings.ToLower(provider)
+	switch provider {
+	case "gmail", "email", "mail":
+		provider = oauth.ProviderGmail
+	case "slack":
+		provider = oauth.ProviderSlack
+	case "calendar", "gcal", "google-calendar":
+		provider = oauth.ProviderCalendar
+	}
+
+	fmt.Print(yellow + "Are you sure you want to disconnect? (y/N): " + reset)
+	confirm, _ := t.reader.ReadString('\n')
+	confirm = strings.TrimSpace(strings.ToLower(confirm))
+
+	if confirm != "y" && confirm != "yes" {
+		fmt.Println(dim + "Cancelled" + reset)
+		return
+	}
+
+	if err := t.integrations.LogoutProvider(provider); err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Printf(green+"✓ Disconnected from %s%s\n", provider, reset)
+}
+
+// openBrowser attempts to open a URL in the default browser.
+func openBrowser(url string) {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "windows":
+		cmd = exec.Command("cmd", "/c", "start", url)
+	default:
+		return
+	}
+
+	cmd.Start()
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

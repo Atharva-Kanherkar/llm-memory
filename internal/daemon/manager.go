@@ -23,6 +23,8 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/screen"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/window"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
 )
@@ -42,6 +44,12 @@ type Manager struct {
 	audioCapturer      *audio.Capturer
 	biometricsCapturer *biometrics.Capturer
 
+	// OCR for pre-computing screen text
+	ocrEngine *ocr.VisionOCR
+
+	// External integrations (Gmail, Slack, Calendar)
+	integrations *integrations.Manager
+
 	// Biometrics trackers (high-frequency)
 	mouseTracker    *biometrics.MouseTracker
 	keyboardTracker *biometrics.KeyboardTracker
@@ -57,33 +65,58 @@ type Manager struct {
 
 // CaptureIntervals defines how often each source is captured.
 type CaptureIntervals struct {
-	Window     time.Duration
-	Screen     time.Duration
-	Git        time.Duration
-	Clipboard  time.Duration
-	Activity   time.Duration
-	Audio      time.Duration
-	Biometrics time.Duration
+	Window       time.Duration
+	Screen       time.Duration
+	Git          time.Duration
+	Clipboard    time.Duration
+	Activity     time.Duration
+	Audio        time.Duration
+	Biometrics   time.Duration
+	Integrations time.Duration
 }
 
 // DefaultIntervals returns sensible default intervals.
 func DefaultIntervals() CaptureIntervals {
 	return CaptureIntervals{
-		Window:     5 * time.Second,
-		Screen:     60 * time.Second,
-		Git:        30 * time.Second,
-		Clipboard:  5 * time.Second,
-		Activity:   5 * time.Second,
-		Audio:      5 * time.Minute,  // Every 5 minutes, if enabled
-		Biometrics: 30 * time.Second, // Stress snapshot every 30 seconds
+		Window:       5 * time.Second,
+		Screen:       60 * time.Second,
+		Git:          30 * time.Second,
+		Clipboard:    5 * time.Second,
+		Activity:     5 * time.Second,
+		Audio:        5 * time.Minute,  // Every 5 minutes, if enabled
+		Biometrics:   30 * time.Second, // Stress snapshot every 30 seconds
+		Integrations: 5 * time.Minute,  // Gmail, Slack, Calendar every 5 minutes
 	}
 }
 
 // NewManager creates a new capture Manager.
-func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Store) *Manager {
+func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Store, apiKey string) *Manager {
 	// Create biometrics capturer and get the analyzer for trackers
 	bioCapturer := biometrics.NewCapturer(plat)
 	analyzer := bioCapturer.GetAnalyzer()
+
+	// Create OCR engine for pre-computing screen text
+	var ocrEngine *ocr.VisionOCR
+	if apiKey != "" {
+		ocrEngine = ocr.NewVisionOCR(apiKey)
+		log.Println("[ocr] Vision OCR enabled for pre-computed screen text")
+	} else {
+		log.Println("[ocr] No API key - OCR disabled (queries will be slower)")
+	}
+
+	// Create integrations manager
+	var intMgr *integrations.Manager
+	intMgr, err := integrations.NewManager(cfg.StoragePath)
+	if err != nil {
+		log.Printf("[integrations] Failed to initialize: %v", err)
+	} else {
+		status := intMgr.GetProviderStatus()
+		for provider, s := range status {
+			if s["authenticated"] {
+				log.Printf("[integrations] %s: connected", provider)
+			}
+		}
+	}
 
 	return &Manager{
 		cfg:                cfg,
@@ -96,6 +129,8 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		activityCapturer:   activity.New(plat),
 		audioCapturer:      audio.New(plat),
 		biometricsCapturer: bioCapturer,
+		ocrEngine:          ocrEngine,
+		integrations:       intMgr,
 		mouseTracker:       biometrics.NewMouseTracker(plat, analyzer),
 		keyboardTracker:    biometrics.NewKeyboardTracker(plat, analyzer),
 	}
@@ -157,6 +192,12 @@ func (m *Manager) Start(ctx context.Context) {
 		m.wg.Add(1)
 		go m.runCaptureLoop("biometrics", intervals.Biometrics, m.captureBiometrics)
 	}
+
+	// External integrations (Gmail, Slack, Calendar)
+	if m.integrations != nil {
+		m.wg.Add(1)
+		go m.runCaptureLoop("integrations", intervals.Integrations, m.captureIntegrations)
+	}
 }
 
 // Stop gracefully stops all capture loops.
@@ -169,6 +210,11 @@ func (m *Manager) Stop() {
 	}
 	if m.keyboardTracker != nil {
 		m.keyboardTracker.Stop()
+	}
+
+	// Close integrations manager
+	if m.integrations != nil {
+		m.integrations.Close()
 	}
 
 	m.cancel()
@@ -236,7 +282,7 @@ func (m *Manager) captureWindow() error {
 	return err
 }
 
-// captureScreen captures a screenshot.
+// captureScreen captures a screenshot and pre-computes OCR text.
 func (m *Manager) captureScreen() error {
 	result, err := m.screenCapturer.Capture(m.ctx)
 	if err != nil {
@@ -244,6 +290,27 @@ func (m *Manager) captureScreen() error {
 	}
 
 	log.Printf("[screen] Captured %s bytes", result.Metadata["size_bytes"])
+
+	// Pre-compute OCR if available
+	if m.ocrEngine != nil && m.ocrEngine.Available() && len(result.RawData) > 0 {
+		// Use a separate context with timeout for OCR
+		ocrCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
+		defer cancel()
+
+		ocrText, ocrErr := m.ocrEngine.ExtractText(ocrCtx, result.RawData)
+		if ocrErr != nil {
+			log.Printf("[ocr] Error extracting text: %v", ocrErr)
+		} else if ocrText != "" {
+			result.TextData = ocrText
+			result.SetMetadata("ocr_precomputed", "true")
+			// Log a brief preview
+			preview := ocrText
+			if len(preview) > 100 {
+				preview = preview[:97] + "..."
+			}
+			log.Printf("[ocr] Extracted: %s", preview)
+		}
+	}
 
 	if m.store != nil {
 		_, err = m.store.Save(result)
@@ -348,6 +415,47 @@ func (m *Manager) captureBiometrics() error {
 		_, err = m.store.Save(result)
 	}
 	return err
+}
+
+// captureIntegrations captures data from external services (Gmail, Slack, Calendar).
+func (m *Manager) captureIntegrations() error {
+	if m.integrations == nil {
+		return nil
+	}
+
+	// Capture Gmail if authenticated
+	if gmailResult, err := m.integrations.CaptureGmail(m.ctx); err == nil && gmailResult != nil {
+		if m.store != nil {
+			m.store.Save(gmailResult)
+		}
+		unread := gmailResult.Metadata["unread_count"]
+		log.Printf("[gmail] Captured emails (unread: %s)", unread)
+	}
+
+	// Capture Slack if authenticated
+	if slackResult, err := m.integrations.CaptureSlack(m.ctx); err == nil && slackResult != nil {
+		if m.store != nil {
+			m.store.Save(slackResult)
+		}
+		count := slackResult.Metadata["message_count"]
+		log.Printf("[slack] Captured messages: %s", count)
+	}
+
+	// Capture Calendar if authenticated
+	if calResult, err := m.integrations.CaptureCalendar(m.ctx); err == nil && calResult != nil {
+		if m.store != nil {
+			m.store.Save(calResult)
+		}
+		count := calResult.Metadata["event_count"]
+		next := calResult.Metadata["next_event"]
+		if next != "" {
+			log.Printf("[calendar] Captured %s events, next: %s", count, next)
+		} else {
+			log.Printf("[calendar] Captured %s events", count)
+		}
+	}
+
+	return nil
 }
 
 // logAvailableCapturers logs which capturers are available.

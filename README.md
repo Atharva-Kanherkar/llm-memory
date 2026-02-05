@@ -13,6 +13,8 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
 - **Proactive Assistant** — Desktop notifications for stress spikes, context reminders, and periodic AI insights (~$2.50/month)
 - **Focus Mode** — AI-powered distraction blocker with visual window borders and smart browser tab detection
+- **Focus Widget** — Beautiful floating timer widget for focus sessions (`mnemosyne widget`)
+- **Persistent Memory** — Hierarchical summarization compresses activity into hourly/daily summaries for full-day recall
 - **External Integrations** — Connect to Gmail, Slack, and Google Calendar for comprehensive memory
 - **Natural Language Queries** — Ask questions like "What was I working on this morning?"
 - **Streaming Responses** — Real-time AI responses with animated loading
@@ -276,28 +278,143 @@ export SLACK_CLIENT_SECRET="your-client-secret"
 
 ## Architecture
 
+### High-Level System Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              MNEMOSYNE DAEMON                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐│
+│  │   Window    │  │   Screen    │  │    Git      │  │     Clipboard       ││
+│  │  Capturer   │  │  Capturer   │  │  Capturer   │  │     Capturer        ││
+│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘│
+│         │                │                │                     │          │
+│         └────────────────┴────────────────┴─────────────────────┘          │
+│                                   │                                         │
+│                          ┌────────▼────────┐                               │
+│                          │   Daemon Mgr    │                               │
+│                          │   (Orchestrator)│                               │
+│                          └────────┬────────┘                               │
+│                                   │                                         │
+│         ┌─────────────────────────┼─────────────────────────┐              │
+│         ▼                         ▼                         ▼              │
+│  ┌─────────────┐         ┌─────────────────┐        ┌─────────────┐       │
+│  │   Storage   │         │   Summarizer    │        │   Focus     │       │
+│  │  (SQLite)   │◄────────│   (Compressor)  │        │  Enforcer   │       │
+│  └──────┬──────┘         └────────┬────────┘        └──────┬──────┘       │
+│         │                         │                        │               │
+└─────────┼─────────────────────────┼────────────────────────┼───────────────┘
+          │                         │                        │
+          │                         │                        │
+┌─────────┼─────────────────────────┼────────────────────────┼───────────────┐
+│         │                 QUERY ENGINE                     │               │
+│         ▼                         ▼                        ▼               │
+│  ┌─────────────┐         ┌─────────────────┐        ┌─────────────┐       │
+│  │   Raw       │         │    Summaries    │        │   Focus     │       │
+│  │  Captures   │         │ (hourly/daily)  │        │   Status    │       │
+│  └──────┬──────┘         └────────┬────────┘        └──────┬──────┘       │
+│         │                         │                        │               │
+│         └────────────────────────┬┴────────────────────────┘               │
+│                          ┌───────▼───────┐                                 │
+│                          │  LLM Client   │ ◄─── OpenRouter API             │
+│                          │  (Streaming)  │                                 │
+│                          └───────┬───────┘                                 │
+│                                  │                                         │
+│                          ┌───────▼───────┐                                 │
+│                          │      TUI      │                                 │
+│                          │  (Bubbletea)  │                                 │
+│                          └───────────────┘                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Memory Hierarchy (Human-Like)
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           MEMORY ARCHITECTURE                              │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  Recent (0-30 min)         Hourly (30 min - 1 day)      Daily (1+ days)   │
+│  ┌─────────────────┐       ┌─────────────────────┐      ┌──────────────┐  │
+│  │ Raw Captures    │       │ Hourly Summaries    │      │    Daily     │  │
+│  │ - Full OCR text │  ───▶ │ - ~50 tokens each   │ ───▶ │   Summaries  │  │
+│  │ - Window titles │       │ - Main task/goal    │      │ - ~100 tokens│  │
+│  │ - Clipboard     │       │ - Apps used         │      │ - Key events │  │
+│  │ - Git changes   │       │ - Notable events    │      │ - Patterns   │  │
+│  └─────────────────┘       └─────────────────────┘      └──────────────┘  │
+│                                                                            │
+│  Query: "last 5 min"       Query: "today"               Query: "this week"│
+│  → Uses raw captures       → Uses hourly summaries     → Uses daily sums  │
+│                              + recent raw captures                         │
+└────────────────────────────────────────────────────────────────────────────┘
+
+Cost: ~$0.01/day for continuous summarization (DeepSeek)
+```
+
+### Focus Mode Architecture
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│                          FOCUS MODE PIPELINE                               │
+├────────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  ┌─────────────┐       ┌─────────────────┐       ┌─────────────────────┐  │
+│  │ Window      │       │    Enforcer     │       │     Controller      │  │
+│  │ Change      │  ───▶ │  (Check Rules)  │  ───▶ │   (Hyprland IPC)    │  │
+│  │ Event       │       │                 │       │                     │  │
+│  └─────────────┘       └────────┬────────┘       └──────────┬──────────┘  │
+│                                 │                           │             │
+│                    ┌────────────┼────────────┐              │             │
+│                    ▼            ▼            ▼              ▼             │
+│              ┌──────────┐ ┌──────────┐ ┌──────────┐   ┌───────────┐      │
+│              │ Allowed  │ │ Blocked  │ │ Browser  │   │  Actions  │      │
+│              │   App?   │ │ Pattern? │ │   Tab?   │   │           │      │
+│              └────┬─────┘ └────┬─────┘ └────┬─────┘   │ - Green   │      │
+│                   │            │            │         │   Border  │      │
+│                   │       ┌────▼─────┐      │         │ - Warning │      │
+│                   │       │ LLM Ask  │◄─────┘         │ - Close   │      │
+│                   │       │"Relevant?"│               │   Tab     │      │
+│                   │       └────┬─────┘               │ - Close   │      │
+│                   │            │                      │   Window  │      │
+│                   └────────────┴──────────────────────┴───────────┘      │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Directory Structure
+
 ```
 mnemosyne/
-├── cmd/mnemosyne/       # Main application
-│   ├── main.go          # Entry point
-│   └── tui.go           # Terminal UI
+├── cmd/mnemosyne/         # Main application
+│   ├── main.go            # Entry point
+│   ├── tui.go             # Terminal UI (Bubbletea)
+│   └── widget.go          # Focus mode floating widget
 ├── internal/
-│   ├── capture/         # Data capture modules
-│   │   ├── window/      # Window tracking (Hyprland)
-│   │   ├── screen/      # Screenshot capture + OCR
-│   │   ├── clipboard/   # Clipboard monitoring
-│   │   ├── git/         # Git repository tracking
-│   │   ├── activity/    # Idle detection
-│   │   └── biometrics/  # Stress detection
-│   ├── daemon/          # Background daemon manager
-│   ├── focus/           # AI-powered focus mode & distraction blocking
-│   ├── storage/         # SQLite storage
-│   ├── query/           # Query engine
-│   ├── llm/             # OpenRouter LLM client
-│   ├── ocr/             # Vision-based OCR (two-stage pipeline)
-│   ├── oauth/           # Secure OAuth 2.0 (encrypted tokens)
-│   ├── integrations/    # Gmail, Slack, Calendar clients
-│   └── config/          # Configuration
+│   ├── capture/           # Data capture modules
+│   │   ├── window/        # Window tracking (Hyprland IPC)
+│   │   ├── screen/        # Screenshot capture
+│   │   ├── clipboard/     # Clipboard monitoring (wl-paste)
+│   │   ├── git/           # Git repository tracking
+│   │   ├── activity/      # Idle detection (hypridle)
+│   │   ├── audio/         # Audio capture (opt-in)
+│   │   └── biometrics/    # Stress detection (mouse/keyboard)
+│   ├── daemon/            # Background daemon orchestrator
+│   ├── focus/             # Focus mode system
+│   │   ├── mode.go        # Mode definition & rules
+│   │   ├── builder.go     # AI conversation to build modes
+│   │   ├── enforcer.go    # Window monitoring & blocking
+│   │   ├── controller.go  # Hyprland window control
+│   │   └── widget.go      # Widget state broadcaster
+│   ├── memory/            # Persistent memory
+│   │   └── summarizer.go  # Hourly/daily summarization
+│   ├── storage/           # SQLite persistence
+│   ├── query/             # Query engine
+│   ├── llm/               # OpenRouter LLM client
+│   ├── ocr/               # Vision-based OCR (two-stage)
+│   ├── insights/          # Proactive assistant
+│   ├── oauth/             # Secure OAuth 2.0
+│   ├── integrations/      # Gmail, Slack, Calendar
+│   └── config/            # Configuration
 ```
 
 ### Two-Stage OCR Pipeline
@@ -464,6 +581,101 @@ sudo pacman -S wtype
 | Heavy daily use | ~$0.10 |
 
 Tab decisions are cached, so visiting the same site multiple times costs nothing extra.
+
+## Persistent Memory
+
+Mnemosyne uses hierarchical summarization to maintain persistent memory without exploding token costs. This mimics how human memory works — recent events are detailed, older events are compressed into gist.
+
+### How It Works
+
+```
+Raw Captures ──▶ Hourly Summaries ──▶ Daily Summaries
+(every 10s)      (every 30 min)       (once per day)
+   │                    │                    │
+   │                    │                    │
+   ▼                    ▼                    ▼
+"User clicked on      "10-11am: Worked    "Tuesday: Deep work
+VS Code, opened        on query engine,    on memory system.
+file main.go..."       fixed bug in        Morning stress spike
+                       parsing. Used       during debugging."
+                       VS Code, Firefox."
+```
+
+### Query Behavior
+
+| Query | Data Source |
+|-------|-------------|
+| "What did I just do?" | Raw captures (last 30 min) |
+| "How was my morning?" | Hourly summaries + recent raw |
+| "What did I do today?" | Hourly summaries + recent raw |
+| "What happened yesterday?" | Daily summary |
+| "This week's highlights" | Daily summaries |
+
+### Token Efficiency
+
+| Time Span | Traditional | With Summaries |
+|-----------|-------------|----------------|
+| 1 hour | ~5,000 tokens | ~100 tokens |
+| 1 day | ~60,000 tokens | ~1,200 tokens |
+| 1 week | ~420,000 tokens | ~2,000 tokens |
+
+**Cost**: ~$0.01/day for continuous summarization using DeepSeek.
+
+## Focus Widget
+
+A beautiful floating widget to track your focus sessions:
+
+```bash
+# Interactive terminal widget (full UI)
+mnemosyne widget
+
+# One-line output for waybar/polybar
+mnemosyne widget line
+
+# JSON output for eww
+mnemosyne widget json
+```
+
+### Widget Display
+
+```
+  ╭────────────────────────────────────────╮
+  │ ● FOCUSING                             │
+  ├────────────────────────────────────────┤
+  │             01:23:45                   │
+  │            Study Mode                  │
+  ├────────────────────────────────────────┤
+  │  Blocked: 3                            │
+  │  ✓ Allowed: claude.ai - Claude         │
+  ╰────────────────────────────────────────╯
+
+  Ctrl+C to close • /stop to end session
+```
+
+### Waybar Integration
+
+Add to your waybar config:
+
+```json
+"custom/mnemosyne": {
+    "exec": "mnemosyne widget line",
+    "interval": 1,
+    "format": "{}"
+}
+```
+
+### EWW Integration
+
+```lisp
+(deflisten focus-state :initial "{}"
+  `while true; do mnemosyne widget json; sleep 1; done`)
+
+(defwidget focus []
+  (box :class "focus-widget"
+    (label :text {focus-state.active ?
+      "● ${focus-state.mode_name} ${focus-state.elapsed}" :
+      "○ Focus Off"})))
+```
 
 ## Models
 

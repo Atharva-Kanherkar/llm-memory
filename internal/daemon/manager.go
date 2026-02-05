@@ -27,6 +27,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/focus"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/insights"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/memory"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
@@ -59,6 +60,9 @@ type Manager struct {
 	// Focus mode enforcer
 	focusEnforcer *focus.Enforcer
 	apiKey        string
+
+	// Memory summarizer for persistent context
+	memorySummarizer *memory.Summarizer
 
 	// Biometrics trackers (high-frequency)
 	mouseTracker    *biometrics.MouseTracker
@@ -146,6 +150,13 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		log.Println("[focus] Focus mode enforcer enabled")
 	}
 
+	// Create memory summarizer for persistent context
+	var memorySummarizer *memory.Summarizer
+	if apiKey != "" {
+		memorySummarizer = memory.NewSummarizer(store, apiKey)
+		log.Println("[memory] Summarizer enabled for persistent context")
+	}
+
 	return &Manager{
 		cfg:                cfg,
 		platform:           plat,
@@ -162,6 +173,7 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		insightEngine:      insightEngine,
 		focusEnforcer:      focusEnforcer,
 		apiKey:             apiKey,
+		memorySummarizer:   memorySummarizer,
 		mouseTracker:       biometrics.NewMouseTracker(plat, analyzer),
 		keyboardTracker:    biometrics.NewKeyboardTracker(plat, analyzer),
 	}
@@ -239,6 +251,17 @@ func (m *Manager) Start(ctx context.Context) {
 	if m.focusEnforcer != nil {
 		m.wg.Add(1)
 		go m.runFocusEnforcer()
+	}
+
+	// Start memory summarizer for persistent context
+	if m.memorySummarizer != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			log.Println("[memory] Starting memory summarizer")
+			m.memorySummarizer.Run(m.ctx)
+			log.Println("[memory] Memory summarizer stopped")
+		}()
 	}
 }
 

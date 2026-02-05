@@ -139,6 +139,21 @@ func (s *Store) initSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_focus_sessions_mode ON focus_sessions(mode_id);
 	CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_at);
+
+	CREATE TABLE IF NOT EXISTS summaries (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		summary_type TEXT NOT NULL,
+		start_time DATETIME NOT NULL,
+		end_time DATETIME NOT NULL,
+		content TEXT NOT NULL,
+		apps TEXT,
+		tokens INT DEFAULT 0,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_summaries_type ON summaries(summary_type);
+	CREATE INDEX IF NOT EXISTS idx_summaries_start ON summaries(start_time);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_summaries_unique ON summaries(summary_type, start_time);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -753,4 +768,93 @@ func (s *Store) GetFocusSessionStats(modeID string) (totalSessions int, totalMin
 
 	err = row.Scan(&totalSessions, &totalMinutes, &totalBlocks)
 	return
+}
+
+// SummaryRecord represents a memory summary in the database.
+type SummaryRecord struct {
+	ID        int64
+	Type      string
+	StartTime time.Time
+	EndTime   time.Time
+	Content   string
+	Apps      string
+	Tokens    int
+	CreatedAt time.Time
+}
+
+// SaveSummary saves a memory summary to the database.
+func (s *Store) SaveSummary(summary *SummaryRecord) error {
+	_, err := s.db.Exec(`
+		INSERT OR REPLACE INTO summaries
+		(summary_type, start_time, end_time, content, apps, tokens)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, summary.Type, summary.StartTime, summary.EndTime, summary.Content, summary.Apps, summary.Tokens)
+	return err
+}
+
+// SummaryExists checks if a summary exists for a given type and start time.
+func (s *Store) SummaryExists(summaryType string, startTime time.Time) (bool, error) {
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM summaries
+		WHERE summary_type = ? AND start_time = ?
+	`, summaryType, startTime).Scan(&count)
+	return count > 0, err
+}
+
+// GetSummariesByRange retrieves summaries within a time range.
+func (s *Store) GetSummariesByRange(summaryType string, start, end time.Time) ([]SummaryRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, summary_type, start_time, end_time, content, apps, tokens, created_at
+		FROM summaries
+		WHERE summary_type = ? AND start_time >= ? AND start_time < ?
+		ORDER BY start_time ASC
+	`, summaryType, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []SummaryRecord
+	for rows.Next() {
+		var sum SummaryRecord
+		var apps sql.NullString
+		err := rows.Scan(&sum.ID, &sum.Type, &sum.StartTime, &sum.EndTime,
+			&sum.Content, &apps, &sum.Tokens, &sum.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		sum.Apps = apps.String
+		summaries = append(summaries, sum)
+	}
+	return summaries, nil
+}
+
+// GetRecentSummaries retrieves recent summaries of a given type.
+func (s *Store) GetRecentSummaries(summaryType string, limit int) ([]SummaryRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, summary_type, start_time, end_time, content, apps, tokens, created_at
+		FROM summaries
+		WHERE summary_type = ?
+		ORDER BY start_time DESC
+		LIMIT ?
+	`, summaryType, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var summaries []SummaryRecord
+	for rows.Next() {
+		var sum SummaryRecord
+		var apps sql.NullString
+		err := rows.Scan(&sum.ID, &sum.Type, &sum.StartTime, &sum.EndTime,
+			&sum.Content, &apps, &sum.Tokens, &sum.CreatedAt)
+		if err != nil {
+			return nil, err
+		}
+		sum.Apps = apps.String
+		summaries = append(summaries, sum)
+	}
+	return summaries, nil
 }

@@ -361,50 +361,123 @@ func (e *Engine) AskStream(ctx context.Context, question string, onChunk func(st
 }
 
 // buildQueryContext builds the context for a query.
+// Uses summaries for longer time ranges, raw captures for recent activity.
 func (e *Engine) buildQueryContext(ctx context.Context, question string) (string, error) {
 	// Parse the question to determine time range
 	timeRange := e.parseTimeRange(question)
 	e.debugLog("Parsed time range: %v to %v", timeRange.start, timeRange.end)
 
-	// Get relevant captures - limit to avoid token overflow
-	var records []CaptureRecord
-	var err error
+	now := time.Now()
+	var contextBuilder strings.Builder
 
-	// Limit fetched records to stay within token budget
-	const maxRecords = 60
+	// For day-level or longer queries, use summaries first
+	if !timeRange.start.IsZero() && now.Sub(timeRange.start) > 2*time.Hour {
+		e.debugLog("Long time range detected, fetching summaries...")
+		summaryContext := e.buildSummaryBasedContext(ctx, timeRange.start, timeRange.end)
+		if summaryContext != "" {
+			contextBuilder.WriteString("=== Activity Timeline (Compressed) ===\n")
+			contextBuilder.WriteString(summaryContext)
+			contextBuilder.WriteString("\n")
+		}
+	}
 
-	if timeRange.start.IsZero() {
-		e.debugLog("No time range, fetching last %d captures", maxRecords)
-		records, err = e.GetRecent(ctx, maxRecords)
-	} else {
-		e.debugLog("Fetching captures in time range")
-		records, err = e.GetByTimeRange(ctx, timeRange.start, timeRange.end)
-		// Limit even time range queries
+	// For recent activity (last 2 hours), include detailed raw captures
+	recentStart := now.Add(-2 * time.Hour)
+	if timeRange.start.IsZero() || timeRange.end.After(recentStart) {
+		var recordStart time.Time
+		if timeRange.start.IsZero() {
+			recordStart = recentStart
+		} else if timeRange.start.After(recentStart) {
+			recordStart = timeRange.start
+		} else {
+			recordStart = recentStart
+		}
+
+		recordEnd := timeRange.end
+		if recordEnd.IsZero() || recordEnd.After(now) {
+			recordEnd = now
+		}
+
+		e.debugLog("Fetching recent captures from %v to %v", recordStart, recordEnd)
+		records, err := e.GetByTimeRange(ctx, recordStart, recordEnd)
+		if err != nil {
+			return "", fmt.Errorf("failed to fetch captures: %w", err)
+		}
+
+		// Limit records to stay within token budget
+		const maxRecords = 40
 		if len(records) > maxRecords {
 			records = records[:maxRecords]
 		}
-	}
 
-	if err != nil {
-		return "", fmt.Errorf("failed to fetch captures: %w", err)
-	}
-
-	e.debugLog("Found %d records", len(records))
-	if len(records) == 0 {
-		return "", nil
-	}
-
-	// Count screenshots for OCR
-	screenCount := 0
-	for _, r := range records {
-		if r.Source == "screen" {
-			screenCount++
+		if len(records) > 0 {
+			e.debugLog("Found %d recent records", len(records))
+			contextBuilder.WriteString("\n=== Recent Detail ===\n")
+			contextBuilder.WriteString(e.BuildContext(ctx, records, true))
 		}
 	}
-	e.debugLog("Building context (%d screenshots will use OCR)...", screenCount)
 
-	// Build context (include OCR for screenshots)
-	return e.BuildContext(ctx, records, true), nil
+	result := contextBuilder.String()
+	if result == "" {
+		// Fallback: fetch recent captures
+		e.debugLog("No summaries or recent data, falling back to recent captures")
+		records, err := e.GetRecent(ctx, 40)
+		if err != nil {
+			return "", fmt.Errorf("failed to fetch captures: %w", err)
+		}
+		if len(records) == 0 {
+			return "", nil
+		}
+		return e.BuildContext(ctx, records, true), nil
+	}
+
+	return result, nil
+}
+
+// buildSummaryBasedContext builds context from hourly/daily summaries.
+func (e *Engine) buildSummaryBasedContext(ctx context.Context, start, end time.Time) string {
+	var sb strings.Builder
+
+	// Try to get hourly summaries
+	rows, err := e.db.QueryContext(ctx, `
+		SELECT start_time, content, apps
+		FROM summaries
+		WHERE summary_type = 'hourly' AND start_time >= ? AND start_time < ?
+		ORDER BY start_time ASC
+	`, start, end)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var startTime time.Time
+			var content string
+			var apps sql.NullString
+			if err := rows.Scan(&startTime, &content, &apps); err == nil {
+				sb.WriteString(fmt.Sprintf("[%s] %s\n", startTime.Format("15:04"), content))
+			}
+		}
+	}
+
+	// If no hourly summaries, try daily
+	if sb.Len() == 0 {
+		rows, err := e.db.QueryContext(ctx, `
+			SELECT start_time, content
+			FROM summaries
+			WHERE summary_type = 'daily' AND start_time >= ? AND start_time < ?
+			ORDER BY start_time ASC
+		`, start, end)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var startTime time.Time
+				var content string
+				if err := rows.Scan(&startTime, &content); err == nil {
+					sb.WriteString(fmt.Sprintf("[%s] %s\n", startTime.Format("2006-01-02"), content))
+				}
+			}
+		}
+	}
+
+	return sb.String()
 }
 
 // timeRange represents a parsed time range from a query.
@@ -420,7 +493,8 @@ func (e *Engine) parseTimeRange(question string) timeRange {
 	lower := strings.ToLower(question)
 
 	// Check for common patterns
-	if strings.Contains(lower, "today") {
+	if strings.Contains(lower, "today") || strings.Contains(lower, "my day") ||
+		strings.Contains(lower, "this day") || strings.Contains(lower, "the day") {
 		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		return timeRange{start: start, end: now}
 	}

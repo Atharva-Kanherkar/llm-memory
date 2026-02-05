@@ -53,6 +53,20 @@ func main() {
 		runAsk(question)
 	case "stats", "s":
 		runStats()
+	case "widget", "w":
+		// Parse widget subcommand
+		if len(os.Args) > 2 {
+			switch os.Args[2] {
+			case "json":
+				RunWidgetJSON()
+			case "line", "oneline":
+				RunWidgetOneLine()
+			default:
+				RunWidget()
+			}
+		} else {
+			RunWidget()
+		}
 	case "help", "-h", "--help":
 		printHelp()
 	default:
@@ -73,6 +87,9 @@ Commands:
   query, q     Start interactive query interface
   ask "..."    Ask a single question
   stats, s     Show capture statistics
+  widget, w    Show focus mode widget (floating timer)
+  widget json  Output widget state as JSON (for eww)
+  widget line  Output one-line status (for waybar/polybar)
   help         Show this help
 
 Environment:
@@ -81,7 +98,8 @@ Environment:
 Examples:
   mnemosyne                           # Start capturing
   mnemosyne query                     # Interactive mode
-  mnemosyne ask "what was I doing?"   # Quick question`)
+  mnemosyne ask "what was I doing?"   # Quick question
+  mnemosyne widget                    # Focus timer widget`)
 }
 
 func runDaemon() {

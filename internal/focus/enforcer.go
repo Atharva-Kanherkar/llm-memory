@@ -27,6 +27,7 @@ type Enforcer struct {
 	mode      *FocusMode
 	sessionID int64
 	active    bool
+	startedAt time.Time
 
 	// Cache LLM decisions for browser tabs
 	tabCache map[string]Decision
@@ -36,12 +37,15 @@ type Enforcer struct {
 	warnedWindows map[string]time.Time
 	warnedMu      sync.Mutex
 
+	// Widget broadcaster
+	widget *WidgetBroadcaster
+
 	httpClient *http.Client
 	mu         sync.RWMutex
 }
 
 // NewEnforcer creates a new focus mode enforcer.
-func NewEnforcer(store *storage.Store, apiKey, llmModel string) *Enforcer {
+func NewEnforcer(store *storage.Store, apiKey, llmModel, dataDir string) *Enforcer {
 	return &Enforcer{
 		store:         store,
 		controller:    NewController(),
@@ -50,6 +54,7 @@ func NewEnforcer(store *storage.Store, apiKey, llmModel string) *Enforcer {
 		llmModel:      llmModel,
 		tabCache:      make(map[string]Decision),
 		warnedWindows: make(map[string]time.Time),
+		widget:        NewWidgetBroadcaster(dataDir),
 		httpClient:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
@@ -68,6 +73,7 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 	e.mode = mode
 	e.sessionID = sessionID
 	e.active = true
+	e.startedAt = time.Now()
 
 	// Clear caches
 	e.cacheMu.Lock()
@@ -77,6 +83,17 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 	e.warnedMu.Lock()
 	e.warnedWindows = make(map[string]time.Time)
 	e.warnedMu.Unlock()
+
+	// Update widget
+	if e.widget != nil {
+		e.widget.UpdateState(WidgetState{
+			Active:      true,
+			ModeName:    mode.Name,
+			Purpose:     mode.Purpose,
+			StartedAt:   e.startedAt,
+			BlocksCount: 0,
+		})
+	}
 
 	log.Printf("[focus] Started mode: %s", mode.Name)
 	e.notifier.Send(
@@ -109,6 +126,11 @@ func (e *Enforcer) Stop() error {
 
 	// Reset all window borders to normal
 	e.resetAllBorders()
+
+	// Clear widget
+	if e.widget != nil {
+		e.widget.Clear()
+	}
 
 	e.mode = nil
 	e.sessionID = 0
@@ -172,6 +194,7 @@ func (e *Enforcer) check() {
 	}
 	mode := e.mode
 	sessionID := e.sessionID
+	startedAt := e.startedAt
 	e.mu.RUnlock()
 
 	// Get active window
@@ -182,6 +205,22 @@ func (e *Enforcer) check() {
 
 	// Evaluate the window
 	decision := e.evaluate(window, mode)
+
+	// Record decision to widget
+	if e.widget != nil {
+		e.widget.RecordDecision(window.Class, window.Title, decision.Action)
+		// Update elapsed time
+		e.widget.UpdateState(WidgetState{
+			Active:       true,
+			ModeName:     mode.Name,
+			Purpose:      mode.Purpose,
+			StartedAt:    startedAt,
+			BlocksCount:  e.widget.GetState().BlocksCount,
+			LastDecision: e.widget.GetState().LastDecision,
+			LastApp:      window.Class,
+			LastAction:   decision.Action,
+		})
+	}
 
 	if decision.Action == "warn" {
 		// Set red border immediately
@@ -482,6 +521,9 @@ func (e *Enforcer) handleWarn(window *Window, decision Decision, sessionID int64
 
 	// Increment block count
 	e.store.IncrementFocusSessionBlocks(sessionID)
+	if e.widget != nil {
+		e.widget.IncrementBlocks()
+	}
 
 	e.notifier.Send(
 		"Distraction Blocked",

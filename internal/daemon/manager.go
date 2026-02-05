@@ -142,7 +142,7 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 	// Create focus mode enforcer
 	var focusEnforcer *focus.Enforcer
 	if apiKey != "" {
-		focusEnforcer = focus.NewEnforcer(store, apiKey, "deepseek/deepseek-chat")
+		focusEnforcer = focus.NewEnforcer(store, apiKey, "deepseek/deepseek-chat", cfg.StoragePath)
 		log.Println("[focus] Focus mode enforcer enabled")
 	}
 

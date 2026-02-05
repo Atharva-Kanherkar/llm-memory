@@ -18,6 +18,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/integrations"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/llm"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/oauth"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/query"
 )
 
@@ -414,6 +415,9 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 		} else {
 			t.runSetup(ctx, args[0])
 		}
+
+	case "/backfill":
+		t.backfillOCR(ctx)
 
 	default:
 		fmt.Printf(red+"Unknown command: %s\n"+reset, cmd)
@@ -1311,6 +1315,122 @@ func (t *TUI) runSetup(ctx context.Context, provider string) {
 		fmt.Println(red + "Unknown provider: " + provider + reset)
 		fmt.Println(dim + "Available: google, slack" + reset)
 	}
+}
+
+// backfillOCR runs OCR on all screenshots that don't have pre-computed text.
+func (t *TUI) backfillOCR(ctx context.Context) {
+	if t.apiKey == "" {
+		fmt.Println(red + "Error: No API key configured for OCR" + reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(blue + "╭─" + reset + bold + " backfill OCR " + reset + blue + strings.Repeat("─", 43) + "╮" + reset)
+	fmt.Println(blue + "│" + reset)
+
+	// Count screenshots without OCR
+	var total, needsOCR int
+	t.db.QueryRow("SELECT COUNT(*) FROM captures WHERE source = 'screen'").Scan(&total)
+	t.db.QueryRow("SELECT COUNT(*) FROM captures WHERE source = 'screen' AND (text_data IS NULL OR text_data = '')").Scan(&needsOCR)
+
+	fmt.Printf(blue+"│"+reset+" Total screenshots: %d\n", total)
+	fmt.Printf(blue+"│"+reset+" Need OCR: %s%d%s\n", yellow, needsOCR, reset)
+	fmt.Println(blue + "│" + reset)
+
+	if needsOCR == 0 {
+		fmt.Println(blue + "│" + reset + " " + green + "All screenshots already have OCR!" + reset)
+		fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	fmt.Println(blue + "│" + reset + " " + yellow + "This will make API calls and may take a while." + reset)
+	fmt.Println(blue + "│" + reset + " " + dim + "Estimated time: ~" + fmt.Sprintf("%d", needsOCR*3) + " seconds" + reset)
+	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+	fmt.Print("\n" + yellow + "Continue? [y/N]: " + reset)
+
+	confirm, _ := t.reader.ReadString('\n')
+	if strings.TrimSpace(strings.ToLower(confirm)) != "y" {
+		fmt.Println(dim + "Cancelled" + reset)
+		return
+	}
+
+	// Create OCR engine
+	ocrEngine := ocr.NewVisionOCR(t.apiKey)
+	if !ocrEngine.Available() {
+		fmt.Println(red + "Error: OCR engine not available" + reset)
+		return
+	}
+
+	// Get screenshots without OCR
+	rows, err := t.db.QueryContext(ctx, `
+		SELECT id, raw_data_path
+		FROM captures
+		WHERE source = 'screen'
+		AND (text_data IS NULL OR text_data = '')
+		AND raw_data_path IS NOT NULL
+		ORDER BY timestamp DESC
+	`)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+	defer rows.Close()
+
+	var toProcess []struct {
+		id   int64
+		path string
+	}
+	for rows.Next() {
+		var id int64
+		var path string
+		rows.Scan(&id, &path)
+		toProcess = append(toProcess, struct {
+			id   int64
+			path string
+		}{id, path})
+	}
+
+	fmt.Println()
+	processed := 0
+	failed := 0
+
+	for i, item := range toProcess {
+		// Check if file exists
+		if _, err := os.Stat(item.path); os.IsNotExist(err) {
+			failed++
+			continue
+		}
+
+		// Show progress
+		fmt.Printf("\r%s[%d/%d]%s Processing... ", cyan, i+1, len(toProcess), reset)
+
+		// Run OCR with timeout
+		ocrCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		text, err := ocrEngine.ExtractTextFromFile(ocrCtx, item.path)
+		cancel()
+
+		if err != nil {
+			failed++
+			continue
+		}
+
+		// Update database
+		_, err = t.db.ExecContext(ctx, "UPDATE captures SET text_data = ? WHERE id = ?", text, item.id)
+		if err != nil {
+			failed++
+			continue
+		}
+
+		processed++
+	}
+
+	fmt.Println()
+	fmt.Println()
+	fmt.Printf(green+"✓ Processed: %d%s\n", processed, reset)
+	if failed > 0 {
+		fmt.Printf(yellow+"✗ Failed: %d%s\n", failed, reset)
+	}
+	fmt.Println(dim + "Future queries will be much faster!" + reset)
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

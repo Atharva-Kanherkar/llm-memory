@@ -134,6 +134,7 @@ func (s *Store) initSchema() error {
 		started_at DATETIME NOT NULL,
 		ended_at DATETIME,
 		blocks_count INT DEFAULT 0,
+		heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (mode_id) REFERENCES focus_modes(id)
 	);
 
@@ -618,6 +619,7 @@ type FocusSessionRecord struct {
 	StartedAt   time.Time
 	EndedAt     *time.Time
 	BlocksCount int
+	Heartbeat   time.Time // Last heartbeat from TUI
 }
 
 // SaveFocusMode saves a focus mode to the database.
@@ -705,13 +707,21 @@ func (s *Store) DeleteFocusMode(id string) error {
 // StartFocusSession starts a new focus session.
 func (s *Store) StartFocusSession(modeID string) (int64, error) {
 	res, err := s.db.Exec(`
-		INSERT INTO focus_sessions (mode_id, started_at)
-		VALUES (?, CURRENT_TIMESTAMP)
+		INSERT INTO focus_sessions (mode_id, started_at, heartbeat)
+		VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 	`, modeID)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
+}
+
+// UpdateFocusSessionHeartbeat updates the heartbeat timestamp for a session.
+func (s *Store) UpdateFocusSessionHeartbeat(sessionID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions SET heartbeat = CURRENT_TIMESTAMP WHERE id = ?
+	`, sessionID)
+	return err
 }
 
 // EndFocusSession ends a focus session.
@@ -720,6 +730,17 @@ func (s *Store) EndFocusSession(sessionID int64) error {
 		UPDATE focus_sessions SET ended_at = CURRENT_TIMESTAMP WHERE id = ?
 	`, sessionID)
 	return err
+}
+
+// EndAllActiveFocusSessions ends all active focus sessions (cleanup orphans).
+func (s *Store) EndAllActiveFocusSessions() (int64, error) {
+	result, err := s.db.Exec(`
+		UPDATE focus_sessions SET ended_at = CURRENT_TIMESTAMP WHERE ended_at IS NULL
+	`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // IncrementFocusSessionBlocks increments the block count for a session.
@@ -731,18 +752,20 @@ func (s *Store) IncrementFocusSessionBlocks(sessionID int64) error {
 }
 
 // GetActiveFocusSession returns the currently active session if any.
+// Only returns sessions with a heartbeat within the last 2 minutes.
 func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT id, mode_id, started_at, ended_at, blocks_count
+		SELECT id, mode_id, started_at, ended_at, blocks_count, COALESCE(heartbeat, started_at)
 		FROM focus_sessions
 		WHERE ended_at IS NULL
+		  AND (heartbeat IS NULL OR heartbeat > datetime('now', '-2 minutes'))
 		ORDER BY started_at DESC LIMIT 1
 	`)
 
 	var session FocusSessionRecord
 	var endedAt sql.NullTime
 
-	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount)
+	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount, &session.Heartbeat)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

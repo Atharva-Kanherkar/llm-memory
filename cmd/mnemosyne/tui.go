@@ -9,10 +9,12 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
@@ -180,8 +182,11 @@ type TUI struct {
 	alertMu      sync.Mutex
 
 	// Focus mode
-	focusBuilder *focus.Builder
-	inFocusChat  bool
+	focusBuilder      *focus.Builder
+	inFocusChat       bool
+	activeSessionID   int64        // Currently active focus session (for heartbeat)
+	heartbeatStop     chan struct{} // Stop signal for heartbeat goroutine
+	heartbeatStopOnce sync.Once
 }
 
 // toggleDebug enables or disables debug logging.
@@ -1943,18 +1948,57 @@ func (t *TUI) startFocusSession(ctx context.Context, nameOrID string) {
 	fmt.Println(green + "│" + reset + " " + dim + "Use /stop to end the session" + reset)
 	fmt.Println(green + "╰" + strings.Repeat("─", 58) + "╯" + reset)
 
-	// TODO: Signal daemon to start enforcer
-	// For now, the daemon will pick it up from the active session in DB
+	// Start heartbeat goroutine to keep session alive
+	t.startHeartbeat(sessionID)
+}
+
+// startHeartbeat starts a goroutine that periodically updates the session heartbeat.
+func (t *TUI) startHeartbeat(sessionID int64) {
+	// Stop any existing heartbeat
+	t.stopHeartbeat()
+
+	t.activeSessionID = sessionID
+	t.heartbeatStop = make(chan struct{})
+	t.heartbeatStopOnce = sync.Once{}
+
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-t.heartbeatStop:
+				return
+			case <-ticker.C:
+				if t.store != nil && t.activeSessionID != 0 {
+					t.store.UpdateFocusSessionHeartbeat(t.activeSessionID)
+				}
+			}
+		}
+	}()
+}
+
+// stopHeartbeat stops the heartbeat goroutine.
+func (t *TUI) stopHeartbeat() {
+	if t.heartbeatStop != nil {
+		t.heartbeatStopOnce.Do(func() {
+			close(t.heartbeatStop)
+		})
+	}
+	t.activeSessionID = 0
 }
 
 // stopFocusSession ends the current focus session.
 func (t *TUI) stopFocusSession(ctx context.Context) {
+	// Stop heartbeat goroutine first
+	t.stopHeartbeat()
+
 	if t.store == nil {
 		fmt.Println(red + "Error: Storage not initialized" + reset)
 		return
 	}
 
-	// Get active session
+	// Get active session for stats display
 	session, err := t.store.GetActiveFocusSession()
 	if err != nil {
 		fmt.Printf(red+"Error: %v%s\n", err, reset)
@@ -1966,10 +2010,14 @@ func (t *TUI) stopFocusSession(ctx context.Context) {
 		return
 	}
 
-	// End session
-	if err := t.store.EndFocusSession(session.ID); err != nil {
+	// End ALL active sessions (cleanup any orphans)
+	ended, err := t.store.EndAllActiveFocusSessions()
+	if err != nil {
 		fmt.Printf(red+"Error ending session: %v%s\n", err, reset)
 		return
+	}
+	if ended > 1 {
+		fmt.Printf(dim+"(cleaned up %d orphaned sessions)%s\n", ended-1, reset)
 	}
 
 	// Calculate duration
@@ -2059,5 +2107,21 @@ func RunQuery(apiKey string) error {
 	defer db.Close()
 
 	tui := NewTUI(db, apiKey)
+
+	// Set up signal handler to clean up focus sessions on exit
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		// Stop heartbeat and clean up any active focus sessions
+		tui.stopHeartbeat()
+		if tui.store != nil {
+			if ended, err := tui.store.EndAllActiveFocusSessions(); err == nil && ended > 0 {
+				fmt.Printf("\n%sCleaned up %d focus session(s)%s\n", dim, ended, reset)
+			}
+		}
+		os.Exit(0)
+	}()
+
 	return tui.Run(context.Background())
 }

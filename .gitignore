@@ -1,5 +1,5 @@
-# Binary
-mnemosyne
+# Binary (root level only)
+/mnemosyne
 
 # IDE
 .idea/

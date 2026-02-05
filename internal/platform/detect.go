@@ -20,7 +20,7 @@ type DisplayServer string
 const (
 	DisplayServerHyprland DisplayServer = "hyprland"
 	DisplayServerSway     DisplayServer = "sway"
-	DisplayServerWayland  DisplayServer = "wayland"  // Generic Wayland (GNOME, KDE)
+	DisplayServerWayland  DisplayServer = "wayland" // Generic Wayland (GNOME, KDE)
 	DisplayServerX11      DisplayServer = "x11"
 	DisplayServerMacOS    DisplayServer = "macos"
 	DisplayServerUnknown  DisplayServer = "unknown"
@@ -35,13 +35,13 @@ type Platform struct {
 	DisplayServer DisplayServer
 
 	// Available tools - these are set based on what's installed
-	HasHyprctl  bool // Hyprland control tool
-	HasGrim     bool // Wayland screenshot tool
-	HasSlurp    bool // Wayland region selector
-	HasWlPaste  bool // Wayland clipboard
-	HasXdotool  bool // X11 window info
-	HasScrot    bool // X11 screenshot
-	HasXclip    bool // X11 clipboard
+	HasHyprctl   bool // Hyprland control tool
+	HasGrim      bool // Wayland screenshot tool
+	HasSlurp     bool // Wayland region selector
+	HasWlPaste   bool // Wayland clipboard
+	HasXdotool   bool // X11 window info
+	HasScrot     bool // X11 screenshot
+	HasXclip     bool // X11 clipboard
 	HasTesseract bool // OCR
 }
 

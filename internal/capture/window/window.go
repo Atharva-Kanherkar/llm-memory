@@ -62,19 +62,19 @@ func (c *Capturer) Capture(ctx context.Context) (*capture.Result, error) {
 // The struct tags map JSON keys to Go struct fields.
 // Hyprland returns a lot of info - we capture what's useful.
 type HyprlandWindow struct {
-	Address      string `json:"address"`
-	At           [2]int `json:"at"`           // [x, y] position
-	Size         [2]int `json:"size"`         // [width, height]
-	Workspace    HyprlandWorkspace `json:"workspace"`
-	Floating     bool   `json:"floating"`
-	Class        string `json:"class"`        // Application class (e.g., "firefox")
-	Title        string `json:"title"`        // Window title
-	PID          int    `json:"pid"`
-	InitialClass string `json:"initialClass"`
-	InitialTitle string `json:"initialTitle"`
-	Mapped       bool   `json:"mapped"`
-	Fullscreen   int    `json:"fullscreen"`   // 0, 1, or 2 for different fullscreen modes
-	FocusHistoryID int  `json:"focusHistoryID"`
+	Address        string            `json:"address"`
+	At             [2]int            `json:"at"`   // [x, y] position
+	Size           [2]int            `json:"size"` // [width, height]
+	Workspace      HyprlandWorkspace `json:"workspace"`
+	Floating       bool              `json:"floating"`
+	Class          string            `json:"class"` // Application class (e.g., "firefox")
+	Title          string            `json:"title"` // Window title
+	PID            int               `json:"pid"`
+	InitialClass   string            `json:"initialClass"`
+	InitialTitle   string            `json:"initialTitle"`
+	Mapped         bool              `json:"mapped"`
+	Fullscreen     int               `json:"fullscreen"` // 0, 1, or 2 for different fullscreen modes
+	FocusHistoryID int               `json:"focusHistoryID"`
 }
 
 type HyprlandWorkspace struct {

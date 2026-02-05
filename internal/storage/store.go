@@ -1,0 +1,354 @@
+// Package storage handles persistence of captures.
+//
+// Architecture:
+// - SQLite database for metadata (searchable, indexed)
+// - File system for raw data (screenshots, audio)
+//
+// Directory structure:
+// ~/.local/share/mnemosyne/
+// ├── mnemosyne.db              # SQLite database
+// ├── captures/
+// │   ├── 2025/
+// │   │   ├── 02/
+// │   │   │   ├── 05/
+// │   │   │   │   ├── screen_143022_abc123.png
+// │   │   │   │   ├── audio_143100_def456.wav
+package storage
+
+import (
+	"crypto/rand"
+	"database/sql"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture"
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
+)
+
+// Store handles persistence of captures.
+type Store struct {
+	db      *sql.DB
+	dataDir string
+}
+
+// New creates a new Store.
+func New(baseDir string) (*Store, error) {
+	// Ensure directories exist
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create base directory: %w", err)
+	}
+
+	capturesDir := filepath.Join(baseDir, "captures")
+	if err := os.MkdirAll(capturesDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create captures directory: %w", err)
+	}
+
+	// Open SQLite database
+	dbPath := filepath.Join(baseDir, "mnemosyne.db")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+
+	store := &Store{
+		db:      db,
+		dataDir: capturesDir,
+	}
+
+	// Initialize schema
+	if err := store.initSchema(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+	}
+
+	return store, nil
+}
+
+// initSchema creates the database tables.
+func (s *Store) initSchema() error {
+	schema := `
+	CREATE TABLE IF NOT EXISTS captures (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		source TEXT NOT NULL,
+		timestamp DATETIME NOT NULL,
+		text_data TEXT,
+		raw_data_path TEXT,
+		metadata JSON,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_captures_timestamp ON captures(timestamp);
+	CREATE INDEX IF NOT EXISTS idx_captures_source ON captures(source);
+
+	CREATE TABLE IF NOT EXISTS sessions (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		start_time DATETIME NOT NULL,
+		end_time DATETIME,
+		summary TEXT,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_sessions_start ON sessions(start_time);
+	`
+
+	_, err := s.db.Exec(schema)
+	return err
+}
+
+// Save persists a capture result.
+func (s *Store) Save(result *capture.Result) (int64, error) {
+	var rawDataPath string
+
+	// If there's raw data, save it to a file
+	if len(result.RawData) > 0 {
+		path, err := s.saveRawData(result)
+		if err != nil {
+			return 0, fmt.Errorf("failed to save raw data: %w", err)
+		}
+		rawDataPath = path
+	}
+
+	// Serialize metadata to JSON
+	metadataJSON, err := json.Marshal(result.Metadata)
+	if err != nil {
+		return 0, fmt.Errorf("failed to serialize metadata: %w", err)
+	}
+
+	// Insert into database
+	res, err := s.db.Exec(`
+		INSERT INTO captures (source, timestamp, text_data, raw_data_path, metadata)
+		VALUES (?, ?, ?, ?, ?)
+	`, result.Source, result.Timestamp, result.TextData, rawDataPath, string(metadataJSON))
+
+	if err != nil {
+		return 0, fmt.Errorf("failed to insert capture: %w", err)
+	}
+
+	return res.LastInsertId()
+}
+
+// saveRawData saves binary data to a file and returns the path.
+func (s *Store) saveRawData(result *capture.Result) (string, error) {
+	// Generate path: captures/YYYY/MM/DD/source_HHMMSS_random.ext
+	t := result.Timestamp
+	dir := filepath.Join(s.dataDir,
+		fmt.Sprintf("%04d", t.Year()),
+		fmt.Sprintf("%02d", t.Month()),
+		fmt.Sprintf("%02d", t.Day()))
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+
+	// Determine file extension
+	ext := ".bin"
+	if format, ok := result.Metadata["format"]; ok {
+		switch format {
+		case "png":
+			ext = ".png"
+		case "jpg", "jpeg":
+			ext = ".jpg"
+		case "wav":
+			ext = ".wav"
+		case "raw":
+			ext = ".raw"
+		}
+	}
+
+	// Generate filename
+	randomBytes := make([]byte, 4)
+	rand.Read(randomBytes)
+	randomHex := hex.EncodeToString(randomBytes)
+
+	filename := fmt.Sprintf("%s_%s_%s%s",
+		result.Source,
+		t.Format("150405"), // HHMMSS
+		randomHex,
+		ext)
+
+	path := filepath.Join(dir, filename)
+
+	// Write file
+	if err := os.WriteFile(path, result.RawData, 0644); err != nil {
+		return "", err
+	}
+
+	return path, nil
+}
+
+// GetRecent retrieves the most recent captures.
+func (s *Store) GetRecent(limit int) ([]CaptureRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, timestamp, text_data, raw_data_path, metadata
+		FROM captures
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []CaptureRecord
+	for rows.Next() {
+		var r CaptureRecord
+		var metadataJSON string
+		var rawDataPath sql.NullString
+		var textData sql.NullString
+
+		err := rows.Scan(&r.ID, &r.Source, &r.Timestamp, &textData, &rawDataPath, &metadataJSON)
+		if err != nil {
+			return nil, err
+		}
+
+		r.TextData = textData.String
+		r.RawDataPath = rawDataPath.String
+
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &r.Metadata)
+		}
+
+		records = append(records, r)
+	}
+
+	return records, nil
+}
+
+// GetBySource retrieves captures from a specific source.
+func (s *Store) GetBySource(source string, limit int) ([]CaptureRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, timestamp, text_data, raw_data_path, metadata
+		FROM captures
+		WHERE source = ?
+		ORDER BY timestamp DESC
+		LIMIT ?
+	`, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []CaptureRecord
+	for rows.Next() {
+		var r CaptureRecord
+		var metadataJSON string
+		var rawDataPath, textData sql.NullString
+
+		err := rows.Scan(&r.ID, &r.Source, &r.Timestamp, &textData, &rawDataPath, &metadataJSON)
+		if err != nil {
+			return nil, err
+		}
+
+		r.TextData = textData.String
+		r.RawDataPath = rawDataPath.String
+
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &r.Metadata)
+		}
+
+		records = append(records, r)
+	}
+
+	return records, nil
+}
+
+// GetByTimeRange retrieves captures within a time range.
+func (s *Store) GetByTimeRange(start, end time.Time) ([]CaptureRecord, error) {
+	rows, err := s.db.Query(`
+		SELECT id, source, timestamp, text_data, raw_data_path, metadata
+		FROM captures
+		WHERE timestamp BETWEEN ? AND ?
+		ORDER BY timestamp DESC
+	`, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []CaptureRecord
+	for rows.Next() {
+		var r CaptureRecord
+		var metadataJSON string
+		var rawDataPath, textData sql.NullString
+
+		err := rows.Scan(&r.ID, &r.Source, &r.Timestamp, &textData, &rawDataPath, &metadataJSON)
+		if err != nil {
+			return nil, err
+		}
+
+		r.TextData = textData.String
+		r.RawDataPath = rawDataPath.String
+
+		if metadataJSON != "" {
+			json.Unmarshal([]byte(metadataJSON), &r.Metadata)
+		}
+
+		records = append(records, r)
+	}
+
+	return records, nil
+}
+
+// CaptureRecord represents a capture stored in the database.
+type CaptureRecord struct {
+	ID          int64
+	Source      string
+	Timestamp   time.Time
+	TextData    string
+	RawDataPath string
+	Metadata    map[string]string
+}
+
+// Close closes the database connection.
+func (s *Store) Close() error {
+	return s.db.Close()
+}
+
+// Stats returns statistics about stored captures.
+func (s *Store) Stats() (Stats, error) {
+	var stats Stats
+
+	// Total captures
+	row := s.db.QueryRow("SELECT COUNT(*) FROM captures")
+	row.Scan(&stats.TotalCaptures)
+
+	// Captures by source
+	rows, err := s.db.Query("SELECT source, COUNT(*) FROM captures GROUP BY source")
+	if err == nil {
+		stats.BySource = make(map[string]int64)
+		for rows.Next() {
+			var source string
+			var count int64
+			rows.Scan(&source, &count)
+			stats.BySource[source] = count
+		}
+		rows.Close()
+	}
+
+	// Database size
+	if info, err := os.Stat(filepath.Join(filepath.Dir(s.dataDir), "mnemosyne.db")); err == nil {
+		stats.DatabaseSize = info.Size()
+	}
+
+	// Data directory size (approximate - just count files)
+	filepath.Walk(s.dataDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			stats.DataSize += info.Size()
+		}
+		return nil
+	})
+
+	return stats, nil
+}
+
+// Stats holds storage statistics.
+type Stats struct {
+	TotalCaptures int64
+	BySource      map[string]int64
+	DatabaseSize  int64
+	DataSize      int64
+}

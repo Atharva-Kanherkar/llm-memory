@@ -1,130 +1,219 @@
-// Package main is the entry point for the Mnemosyne daemon.
+// Package main is the entry point for the Mnemosyne daemon and query interface.
 //
-// Go convention: the main package is always called "main" and must have
-// a main() function. The binary name comes from the directory name (mnemosyne).
+// Usage:
+//
+//	mnemosyne          - Start the capture daemon
+//	mnemosyne daemon   - Start the capture daemon
+//	mnemosyne query    - Start the interactive query interface
+//	mnemosyne ask "question" - Ask a single question
 package main
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
-	"github.com/Atharva-Kanherkar/mnemosyne/internal/capture/window"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/config"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/daemon"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
+
+	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
 
-func main() {
-	// Set up logging with timestamps
-	// log.SetFlags controls what prefix each log line gets
-	// Ldate = date, Ltime = time, Lshortfile = filename:line
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+// openDatabase opens the SQLite database.
+func openDatabase(path string) (*sql.DB, error) {
+	return sql.Open("sqlite3", path)
+}
 
+func main() {
+	// Parse command
+	cmd := "daemon"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
+	}
+
+	switch cmd {
+	case "daemon", "d", "capture":
+		runDaemon()
+	case "query", "q", "tui":
+		runQuery()
+	case "ask", "a":
+		if len(os.Args) < 3 {
+			fmt.Println("Usage: mnemosyne ask \"your question\"")
+			os.Exit(1)
+		}
+		question := strings.Join(os.Args[2:], " ")
+		runAsk(question)
+	case "stats", "s":
+		runStats()
+	case "help", "-h", "--help":
+		printHelp()
+	default:
+		fmt.Printf("Unknown command: %s\n", cmd)
+		printHelp()
+		os.Exit(1)
+	}
+}
+
+func printHelp() {
+	fmt.Println(`Mnemosyne - Your Personal Memory Assistant
+
+Usage:
+  mnemosyne [command]
+
+Commands:
+  daemon, d    Start the capture daemon (default)
+  query, q     Start interactive query interface
+  ask "..."    Ask a single question
+  stats, s     Show capture statistics
+  help         Show this help
+
+Environment:
+  OPENROUTER_API_KEY   API key for OpenRouter (required for queries)
+
+Examples:
+  mnemosyne                           # Start capturing
+  mnemosyne query                     # Interactive mode
+  mnemosyne ask "what was I doing?"   # Quick question`)
+}
+
+func runDaemon() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.Println("Mnemosyne starting...")
 
-	// Load configuration
-	// We'll implement this next - for now it returns defaults
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Detect platform (Hyprland, X11, macOS, etc.)
-	// This tells us which capture methods to use
 	plat, err := platform.Detect()
 	if err != nil {
 		log.Fatalf("Failed to detect platform: %v", err)
 	}
 	log.Printf("Platform detected: %s", plat)
 
-	// Create a context that we'll cancel on shutdown
-	// Context is Go's way of handling cancellation and timeouts
-	// When we cancel this context, all goroutines using it will know to stop
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Ensure cancel is called when main exits
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Failed to get home directory: %v", err)
+	}
+	dataDir := filepath.Join(homeDir, ".local", "share", "mnemosyne")
 
-	// Set up signal handling for graceful shutdown
-	// This is how daemons handle Ctrl+C (SIGINT) and kill signals (SIGTERM)
+	store, err := storage.New(dataDir)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+	defer store.Close()
+
+	log.Printf("Storage initialized at: %s", dataDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Start the capture loop in a goroutine
-	// A goroutine is a lightweight thread managed by Go runtime
-	// The 'go' keyword spawns it to run concurrently
-	go captureLoop(ctx, cfg, plat)
+	manager := daemon.NewManager(cfg, plat, store)
+	manager.Start(ctx)
 
-	// Wait for shutdown signal
-	// This blocks until we receive SIGINT or SIGTERM
+	log.Println("Mnemosyne running. Press Ctrl+C to stop.")
+
 	sig := <-sigChan
 	log.Printf("Received signal %v, shutting down...", sig)
 
-	// Cancel the context - this signals all goroutines to stop
 	cancel()
+	manager.Stop()
 
-	// Give goroutines time to clean up
-	time.Sleep(500 * time.Millisecond)
+	stats, err := store.Stats()
+	if err == nil {
+		log.Printf("Session stats: %d captures stored", stats.TotalCaptures)
+	}
 
 	log.Println("Mnemosyne stopped.")
 }
 
-// captureLoop runs the main capture cycle.
-// It takes a context (for cancellation), config, and platform info.
-func captureLoop(ctx context.Context, cfg *config.Config, plat *platform.Platform) {
-	// A Ticker sends a value on its channel at regular intervals
-	// This is how we implement "capture every N seconds"
-	ticker := time.NewTicker(time.Duration(cfg.CaptureIntervalSeconds) * time.Second)
-	defer ticker.Stop() // Clean up the ticker when we exit
-
-	// Create the window capturer
-	windowCapturer := window.New(plat)
-	if !windowCapturer.Available() {
-		log.Println("WARNING: Window capture not available on this system")
+func runQuery() {
+	cfg, _ := config.Load()
+	apiKey := cfg.LLM.OpenRouterKey
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENROUTER_API_KEY")
 	}
 
-	log.Printf("Capture loop started (interval: %ds)", cfg.CaptureIntervalSeconds)
-
-	// Track the last window to avoid logging duplicates
-	var lastWindow string
-
-	for {
-		// select is Go's way of waiting on multiple channels
-		// It blocks until one of the cases is ready
-		select {
-		case <-ctx.Done():
-			// Context was cancelled - time to shut down
-			log.Println("Capture loop stopping...")
-			return
-
-		case <-ticker.C:
-			// Ticker fired - time to capture
-			if windowCapturer.Available() {
-				result, err := windowCapturer.Capture(ctx)
-				if err != nil {
-					log.Printf("Window capture error: %v", err)
-					continue
-				}
-
-				// Build a summary of the current window
-				appClass := result.Metadata["app_class"]
-				title := result.Metadata["window_title"]
-				workspace := result.Metadata["workspace_name"]
-
-				// Truncate long titles for cleaner logs
-				if len(title) > 60 {
-					title = title[:57] + "..."
-				}
-
-				// Only log if window changed
-				currentWindow := appClass + "|" + title
-				if currentWindow != lastWindow {
-					log.Printf("[%s] %s - %s", workspace, strings.ToUpper(appClass), title)
-					lastWindow = currentWindow
-				}
-			}
-		}
+	if apiKey == "" {
+		fmt.Println("Warning: No OpenRouter API key configured.")
+		fmt.Println("Set OPENROUTER_API_KEY environment variable for LLM queries.")
+		fmt.Println("You can still use /stats, /recent, /search commands.\n")
 	}
+
+	if err := RunQuery(apiKey); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func runAsk(question string) {
+	cfg, _ := config.Load()
+	apiKey := cfg.LLM.OpenRouterKey
+	if apiKey == "" {
+		apiKey = os.Getenv("OPENROUTER_API_KEY")
+	}
+
+	if apiKey == "" {
+		fmt.Println("Error: No OpenRouter API key configured.")
+		fmt.Println("Set OPENROUTER_API_KEY environment variable.")
+		os.Exit(1)
+	}
+
+	// Open database
+	homeDir, _ := os.UserHomeDir()
+	dbPath := filepath.Join(homeDir, ".local", "share", "mnemosyne", "mnemosyne.db")
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Println("Error: No captures found. Run the daemon first.")
+		os.Exit(1)
+	}
+
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	tui := NewTUI(db, apiKey)
+
+	fmt.Println("Thinking...")
+	answer, err := tui.engine.Ask(context.Background(), question)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println(answer)
+}
+
+func runStats() {
+	homeDir, _ := os.UserHomeDir()
+	dbPath := filepath.Join(homeDir, ".local", "share", "mnemosyne", "mnemosyne.db")
+
+	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+		fmt.Println("No captures found. Run the daemon first.")
+		os.Exit(1)
+	}
+
+	db, err := openDatabase(dbPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	tui := NewTUI(db, "")
+	tui.showStats(context.Background())
 }

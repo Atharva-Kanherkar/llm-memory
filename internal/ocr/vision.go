@@ -24,6 +24,7 @@ type VisionOCR struct {
 	apiKey     string
 	baseURL    string
 	model      string
+	compressor string // Cheap model for text compression
 	httpClient *http.Client
 }
 
@@ -32,7 +33,8 @@ func NewVisionOCR(apiKey string) *VisionOCR {
 	return &VisionOCR{
 		apiKey:     apiKey,
 		baseURL:    "https://openrouter.ai/api/v1",
-		model:      "openai/gpt-4o-mini", // Vision-capable and cheap
+		model:      "openai/gpt-4o-mini",      // Vision-capable for OCR
+		compressor: "deepseek/deepseek-chat",  // Very cheap for compression ($0.07/M tokens)
 		httpClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -42,17 +44,37 @@ func (v *VisionOCR) Available() bool {
 	return v.apiKey != ""
 }
 
-// ExtractText extracts and COMPRESSES text from image bytes using vision model.
-// Instead of raw OCR, this returns a concise summary to save tokens.
+// ExtractText extracts text from image and compresses it using a two-stage pipeline:
+// Stage 1: Vision model extracts raw text/description from screenshot
+// Stage 2: Cheap text model compresses it to minimal tokens while preserving meaning
 func (v *VisionOCR) ExtractText(ctx context.Context, imageData []byte) (string, error) {
 	if !v.Available() {
 		return "", fmt.Errorf("no API key configured")
 	}
 
-	// Encode image as base64
+	// Stage 1: Extract raw text/description from image
+	rawText, err := v.extractRaw(ctx, imageData)
+	if err != nil {
+		return "", err
+	}
+
+	// Stage 2: Compress using cheap model
+	compressed, err := v.compressText(ctx, rawText)
+	if err != nil {
+		// If compression fails, return truncated raw text
+		if len(rawText) > 200 {
+			return rawText[:200] + "...", nil
+		}
+		return rawText, nil
+	}
+
+	return compressed, nil
+}
+
+// extractRaw extracts raw text/description from screenshot using vision model.
+func (v *VisionOCR) extractRaw(ctx context.Context, imageData []byte) (string, error) {
 	b64Image := base64.StdEncoding.EncodeToString(imageData)
 
-	// Build the request with image - ask for COMPRESSED output
 	req := map[string]interface{}{
 		"model": v.model,
 		"messages": []map[string]interface{}{
@@ -61,12 +83,13 @@ func (v *VisionOCR) ExtractText(ctx context.Context, imageData []byte) (string, 
 				"content": []map[string]interface{}{
 					{
 						"type": "text",
-						"text": `Describe this screenshot in 2-3 sentences MAX. Include:
-- App name and what user is doing
-- Key visible text (file names, titles, important content)
-- Any code: just mention language and purpose, not full code
+						"text": `Extract key information from this screenshot:
+1. Application name and window title
+2. What the user is doing (coding, browsing, chatting, etc.)
+3. Important visible text (file names, URLs, code snippets, messages)
+4. Any errors or notifications visible
 
-Be extremely concise. Example: "VSCode editing main.go - implementing HTTP server. Terminal shows 'go build' success."`,
+Be thorough but focus on what matters for remembering this moment later.`,
 					},
 					{
 						"type": "image_url",
@@ -77,7 +100,7 @@ Be extremely concise. Example: "VSCode editing main.go - implementing HTTP serve
 				},
 			},
 		},
-		"max_tokens": 200, // Much smaller - we want compression
+		"max_tokens": 500,
 	}
 
 	body, err := json.Marshal(req)
@@ -128,6 +151,85 @@ Be extremely concise. Example: "VSCode editing main.go - implementing HTTP serve
 
 	if len(result.Choices) == 0 {
 		return "", fmt.Errorf("no response from model")
+	}
+
+	return result.Choices[0].Message.Content, nil
+}
+
+// compressText uses a cheap model to compress raw OCR text into minimal tokens.
+// This is Stage 2 of the pipeline - takes ~500 tokens input → ~50 tokens output.
+func (v *VisionOCR) compressText(ctx context.Context, rawText string) (string, error) {
+	if rawText == "" {
+		return "", nil
+	}
+
+	req := map[string]interface{}{
+		"model": v.compressor,
+		"messages": []map[string]interface{}{
+			{
+				"role": "system",
+				"content": `You are a compression engine. Compress the input to 1-2 sentences MAX.
+Keep ONLY: app name, user action, key file/URL names, errors.
+Drop: UI descriptions, formatting, redundant info.
+Output raw text, no quotes or prefixes.`,
+			},
+			{
+				"role": "user",
+				"content": rawText,
+			},
+		},
+		"max_tokens": 100, // Force very short output
+		"temperature": 0,  // Deterministic
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return "", err
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST",
+		v.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+v.apiKey)
+	httpReq.Header.Set("HTTP-Referer", "https://github.com/Atharva-Kanherkar/mnemosyne")
+	httpReq.Header.Set("X-Title", "Mnemosyne Compress")
+
+	resp, err := v.httpClient.Do(httpReq)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", err
+	}
+
+	if result.Error != nil {
+		return "", fmt.Errorf("compression error: %s", result.Error.Message)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("no compression output")
 	}
 
 	return result.Choices[0].Message.Content, nil

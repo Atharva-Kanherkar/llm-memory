@@ -7,7 +7,7 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 ## Features
 
 - **Window Tracking** — Captures active window titles and applications
-- **Screenshot OCR** — Takes periodic screenshots and extracts text using vision AI (pre-computed for instant queries)
+- **Screenshot OCR** — Two-stage AI pipeline: vision model extracts text, cheap model compresses to minimal tokens
 - **Clipboard History** — Tracks everything you copy
 - **Git Activity** — Monitors your repositories, branches, and commits
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
@@ -84,6 +84,8 @@ Start the interactive TUI:
 | `/auth` | Show connected integrations |
 | `/connect <provider>` | Connect Gmail, Slack, or Calendar |
 | `/logout <provider>` | Disconnect a service |
+| `/setup <provider>` | CLI wizard for OAuth setup |
+| `/backfill` | Process old screenshots with OCR |
 | `/debug` | Toggle debug logging |
 | `/help` | Show help |
 | `/quit` | Exit |
@@ -282,11 +284,46 @@ mnemosyne/
 │   ├── storage/         # SQLite storage
 │   ├── query/           # Query engine
 │   ├── llm/             # OpenRouter LLM client
-│   ├── ocr/             # Vision-based OCR
+│   ├── ocr/             # Vision-based OCR (two-stage pipeline)
 │   ├── oauth/           # Secure OAuth 2.0 (encrypted tokens)
 │   ├── integrations/    # Gmail, Slack, Calendar clients
 │   └── config/          # Configuration
 ```
+
+### Two-Stage OCR Pipeline
+
+Screenshots are processed through a two-stage AI pipeline that extracts and compresses text for efficient storage:
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌──────────────┐
+│ Screenshot  │────▶│  GPT-4o-mini     │────▶│  DeepSeek Chat  │────▶│   Storage    │
+│   (PNG)     │     │  (Vision Model)  │     │  (Compressor)   │     │   (SQLite)   │
+└─────────────┘     └──────────────────┘     └─────────────────┘     └──────────────┘
+                           │                         │
+                           ▼                         ▼
+                    Raw extraction            Compressed output
+                    (~500 tokens)             (~50 tokens)
+```
+
+**Stage 1: Vision Extraction**
+- Model: `openai/gpt-4o-mini` (vision-capable)
+- Extracts: app name, window title, user activity, visible text, errors
+- Output: ~500 tokens of detailed description
+
+**Stage 2: Text Compression**
+- Model: `deepseek/deepseek-chat` ($0.07/M tokens)
+- Compresses to 1-2 sentences preserving key information
+- Output: ~50 tokens
+
+**Token Efficiency**
+
+| Scenario | Traditional | Two-Stage Pipeline |
+|----------|-------------|-------------------|
+| 1 screenshot | ~500 tokens | ~50 tokens |
+| 100 screenshots/day | ~50,000 tokens | ~5,000 tokens |
+| Cost (DeepSeek) | N/A | ~$0.0004/day |
+
+This allows capturing every 10 seconds while staying within context limits for queries.
 
 ## Stress Detection
 

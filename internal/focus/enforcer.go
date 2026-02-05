@@ -195,7 +195,6 @@ func (e *Enforcer) check() {
 
 func (e *Enforcer) evaluate(window *Window, mode *FocusMode) Decision {
 	appClass := strings.ToLower(window.Class)
-	title := strings.ToLower(window.Title)
 
 	// 1. Check if explicitly allowed
 	for _, allowed := range mode.AllowedApps {
@@ -204,14 +203,11 @@ func (e *Enforcer) evaluate(window *Window, mode *FocusMode) Decision {
 		}
 	}
 
-	// 2. Check if explicitly blocked
+	// 2. Check if explicitly blocked - but ask LLM if the CONTENT is relevant
 	for _, blocked := range mode.BlockedApps {
 		if strings.ToLower(blocked) == appClass {
-			return Decision{
-				Allowed: false,
-				Action:  "warn",
-				Reason:  fmt.Sprintf("%s is blocked in %s", window.Class, mode.Name),
-			}
+			// Don't auto-block! Check if this specific window content is relevant
+			return e.askLLMForApp(window, blocked, mode)
 		}
 	}
 
@@ -220,19 +216,45 @@ func (e *Enforcer) evaluate(window *Window, mode *FocusMode) Decision {
 		return e.evaluateBrowserTab(window, mode)
 	}
 
-	// 4. Check title for blocked patterns
+	// 4. Check title for blocked patterns - ask LLM if content is relevant
+	titleLower := strings.ToLower(window.Title)
 	for _, pattern := range mode.BlockedPatterns {
-		if strings.Contains(title, strings.ToLower(pattern)) {
-			return Decision{
-				Allowed: false,
-				Action:  "warn",
-				Reason:  fmt.Sprintf("Content contains '%s'", pattern),
-			}
+		if strings.Contains(titleLower, strings.ToLower(pattern)) {
+			return e.askLLMWithContext(window.Title, pattern, mode)
 		}
 	}
 
 	// 5. Default: allow unknown apps (don't be too restrictive)
 	return Decision{Allowed: true, Action: "allow"}
+}
+
+func (e *Enforcer) askLLMForApp(window *Window, blockedApp string, mode *FocusMode) Decision {
+	// Check cache first
+	cacheKey := window.Class + "|" + window.Title
+	e.cacheMu.RLock()
+	if cached, ok := e.tabCache[cacheKey]; ok {
+		e.cacheMu.RUnlock()
+		return cached
+	}
+	e.cacheMu.RUnlock()
+
+	prompt := fmt.Sprintf(`Focus mode purpose: %s
+
+App: %s
+Window title: %s
+
+The app "%s" is in the blocked list, but I need you to check if this SPECIFIC window/content is actually relevant and useful for the focus purpose.
+
+Examples:
+- If purpose is "learning AI" and app is Discord with title "AI Engineers Server - #learning" → ALLOW (relevant community)
+- If purpose is "learning AI" and app is Discord with title "Gaming Server - #memes" → BLOCK (not relevant)
+- If purpose is "coding project" and app is Slack with title "Project Team - #dev" → ALLOW (work related)
+- If purpose is "coding project" and app is Slack with title "Random - #offtopic" → BLOCK (distraction)
+
+Is this SPECIFIC content aligned with "%s"?
+Reply with ONLY one word: ALLOW or BLOCK`, mode.Purpose, window.Class, window.Title, blockedApp, mode.Purpose)
+
+	return e.callLLMForDecision(prompt, cacheKey)
 }
 
 func (e *Enforcer) evaluateBrowserTab(window *Window, mode *FocusMode) Decision {
@@ -247,7 +269,7 @@ func (e *Enforcer) evaluateBrowserTab(window *Window, mode *FocusMode) Decision 
 	}
 	e.cacheMu.RUnlock()
 
-	// Check allowed sites in title
+	// Check allowed sites in title - these are always allowed
 	for _, site := range mode.AllowedSites {
 		if strings.Contains(titleLower, strings.ToLower(site)) {
 			decision := Decision{Allowed: true, Action: "allow"}
@@ -256,26 +278,40 @@ func (e *Enforcer) evaluateBrowserTab(window *Window, mode *FocusMode) Decision 
 		}
 	}
 
-	// Check blocked patterns
+	// Check if title contains blocked patterns - but ASK LLM if it's actually relevant
 	for _, pattern := range mode.BlockedPatterns {
 		if strings.Contains(titleLower, strings.ToLower(pattern)) {
-			decision := Decision{
-				Allowed: false,
-				Action:  "warn",
-				Reason:  fmt.Sprintf("'%s' is blocked", pattern),
-			}
-			e.cacheDecision(title, decision)
-			return decision
+			// Don't auto-block! Ask LLM if this specific content is relevant to the purpose
+			return e.askLLMWithContext(title, pattern, mode)
 		}
 	}
 
-	// Ask LLM for ambiguous tabs
+	// For other tabs, ask LLM if browser policy allows
 	if mode.BrowserPolicy == BrowserPolicyAskLLM {
 		return e.askLLM(title, mode)
 	}
 
 	// Default allow for allowlist mode if not matched
 	return Decision{Allowed: true, Action: "allow"}
+}
+
+func (e *Enforcer) askLLMWithContext(title, matchedPattern string, mode *FocusMode) Decision {
+	prompt := fmt.Sprintf(`Focus mode purpose: %s
+
+Window/Tab title: %s
+
+This matched the blocked pattern "%s", but I need you to check if this SPECIFIC content is actually relevant and useful for the focus purpose.
+
+Examples:
+- If purpose is "learning AI" and title is "YouTube - Machine Learning Tutorial" → ALLOW (educational, relevant)
+- If purpose is "learning AI" and title is "YouTube - Funny Cat Videos" → BLOCK (entertainment, not relevant)
+- If purpose is "studying math" and title is "Reddit - r/learnmath discussion" → ALLOW (educational, relevant)
+- If purpose is "studying math" and title is "Reddit - r/memes" → BLOCK (entertainment, not relevant)
+
+Is this SPECIFIC content aligned with "%s"?
+Reply with ONLY one word: ALLOW or BLOCK`, mode.Purpose, title, matchedPattern, mode.Purpose)
+
+	return e.callLLMForDecision(prompt, title)
 }
 
 func (e *Enforcer) askLLM(tabTitle string, mode *FocusMode) Decision {
@@ -285,11 +321,16 @@ Browser tab: %s
 
 Is this browser tab aligned with the focus purpose? Consider:
 - If it's a tool needed for the stated purpose, it's allowed
-- If it's a distraction (social media, entertainment, news), it's blocked
+- If it's a distraction (social media, entertainment, news unrelated to the task), it's blocked
+- Educational content related to the purpose should be ALLOWED
 - When in doubt, allow
 
 Reply with ONLY one word: ALLOW or BLOCK`, mode.Purpose, tabTitle)
 
+	return e.callLLMForDecision(prompt, tabTitle)
+}
+
+func (e *Enforcer) callLLMForDecision(prompt, cacheKey string) Decision {
 	reqBody := map[string]any{
 		"model": e.llmModel,
 		"messages": []map[string]string{
@@ -354,14 +395,14 @@ Reply with ONLY one word: ALLOW or BLOCK`, mode.Purpose, tabTitle)
 		decision = Decision{
 			Allowed: false,
 			Action:  "warn",
-			Reason:  "Tab not aligned with focus purpose",
+			Reason:  "Content not aligned with focus purpose",
 		}
 	} else {
 		decision = Decision{Allowed: true, Action: "allow"}
 	}
 
-	e.cacheDecision(tabTitle, decision)
-	log.Printf("[focus] LLM decision for '%s': %s", truncateTitle(tabTitle, 50), decision.Action)
+	e.cacheDecision(cacheKey, decision)
+	log.Printf("[focus] LLM decision for '%s': %s", truncateTitle(cacheKey, 50), decision.Action)
 	return decision
 }
 

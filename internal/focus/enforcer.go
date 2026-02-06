@@ -37,6 +37,10 @@ type Enforcer struct {
 	warnedWindows map[string]time.Time
 	warnedMu      sync.Mutex
 
+	// Track window switches
+	lastWindowClass string
+	lastWindowTitle string
+
 	// Widget broadcaster
 	widget *WidgetBroadcaster
 
@@ -46,6 +50,7 @@ type Enforcer struct {
 
 // NewEnforcer creates a new focus mode enforcer.
 func NewEnforcer(store *storage.Store, apiKey, llmModel, dataDir string) *Enforcer {
+	log.Printf("[focus] Creating enforcer with dataDir: %s", dataDir)
 	return &Enforcer{
 		store:         store,
 		controller:    NewController(),
@@ -65,7 +70,7 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 	defer e.mu.Unlock()
 
 	// Start a session in the database
-	sessionID, err := e.store.StartFocusSession(mode.ID)
+	sessionID, err := e.store.StartFocusSession(mode.ID, mode.DurationMinutes)
 	if err != nil {
 		return fmt.Errorf("failed to start session: %w", err)
 	}
@@ -85,6 +90,7 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 	e.warnedMu.Unlock()
 
 	// Update widget
+	log.Printf("[focus] Widget broadcaster: %v", e.widget != nil)
 	if e.widget != nil {
 		e.widget.UpdateState(WidgetState{
 			Active:      true,
@@ -93,6 +99,8 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 			StartedAt:   e.startedAt,
 			BlocksCount: 0,
 		})
+	} else {
+		log.Printf("[focus] WARNING: Widget broadcaster is nil!")
 	}
 
 	log.Printf("[focus] Started mode: %s", mode.Name)
@@ -107,6 +115,11 @@ func (e *Enforcer) Start(mode *FocusMode) error {
 
 // Stop deactivates the current focus mode.
 func (e *Enforcer) Stop() error {
+	return e.StopWithReason("", 0, 0)
+}
+
+// StopWithReason deactivates focus mode and records why it ended.
+func (e *Enforcer) StopWithReason(quitReason string, plannedDuration, actualDuration int) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -114,8 +127,8 @@ func (e *Enforcer) Stop() error {
 		return nil
 	}
 
-	// End the session
-	if err := e.store.EndFocusSession(e.sessionID); err != nil {
+	// End the session with reason
+	if err := e.store.EndFocusSessionWithReason(e.sessionID, quitReason, plannedDuration, actualDuration); err != nil {
 		log.Printf("[focus] Failed to end session: %v", err)
 	}
 
@@ -203,8 +216,14 @@ func (e *Enforcer) check() {
 		return
 	}
 
+	// Track window switches
+	e.trackWindowSwitch(sessionID, window)
+
 	// Evaluate the window
 	decision := e.evaluate(window, mode)
+
+	// Log the decision to database
+	e.logDecision(sessionID, window, decision)
 
 	// Record decision to widget
 	if e.widget != nil {
@@ -229,6 +248,58 @@ func (e *Enforcer) check() {
 	} else if decision.Allowed {
 		// Set green border for allowed windows
 		e.controller.SetWindowAllowed(window.Address)
+	}
+}
+
+func (e *Enforcer) trackWindowSwitch(sessionID int64, window *Window) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	// Only log if window actually changed
+	if window.Class == e.lastWindowClass && window.Title == e.lastWindowTitle {
+		return
+	}
+	e.lastWindowClass = window.Class
+	e.lastWindowTitle = window.Title
+
+	// Log the switch event
+	event := &storage.FocusSessionEvent{
+		SessionID:   sessionID,
+		EventType:   "switch",
+		AppClass:    window.Class,
+		WindowTitle: window.Title,
+		Timestamp:   time.Now(),
+	}
+	if _, err := e.store.SaveFocusSessionEvent(event); err != nil {
+		log.Printf("[focus] Failed to log window switch: %v", err)
+	}
+}
+
+func (e *Enforcer) logDecision(sessionID int64, window *Window, decision Decision) {
+	eventType := decision.Action // 'allow', 'warn', or derived from decision
+	if decision.Action == "warn" {
+		eventType = "block_attempt"
+	}
+
+	llmDecision := ""
+	if decision.Allowed {
+		llmDecision = "ALLOW"
+	} else {
+		llmDecision = "BLOCK"
+	}
+
+	event := &storage.FocusSessionEvent{
+		SessionID:   sessionID,
+		EventType:   eventType,
+		AppClass:    window.Class,
+		WindowTitle: window.Title,
+		LLMDecision: llmDecision,
+		Reason:      decision.Reason,
+		Timestamp:   time.Now(),
+	}
+
+	if _, err := e.store.SaveFocusSessionEvent(event); err != nil {
+		log.Printf("[focus] Failed to log decision: %v", err)
 	}
 }
 

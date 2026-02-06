@@ -70,6 +70,16 @@ func New(baseDir string) (*Store, error) {
 
 // initSchema creates the database tables.
 func (s *Store) initSchema() error {
+	// First create base schema
+	if err := s.createBaseSchema(); err != nil {
+		return err
+	}
+	// Then run migrations for schema updates
+	return s.migrateSchema()
+}
+
+// createBaseSchema creates the initial database tables.
+func (s *Store) createBaseSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS captures (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,11 +145,29 @@ func (s *Store) initSchema() error {
 		ended_at DATETIME,
 		blocks_count INT DEFAULT 0,
 		heartbeat DATETIME DEFAULT CURRENT_TIMESTAMP,
+		quit_reason TEXT,
+		planned_duration_minutes INT DEFAULT 0,
+		actual_duration_minutes INT DEFAULT 0,
 		FOREIGN KEY (mode_id) REFERENCES focus_modes(id)
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_focus_sessions_mode ON focus_sessions(mode_id);
 	CREATE INDEX IF NOT EXISTS idx_focus_sessions_started ON focus_sessions(started_at);
+
+	CREATE TABLE IF NOT EXISTS focus_session_events (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		session_id INTEGER NOT NULL,
+		event_type TEXT NOT NULL,
+		app_class TEXT,
+		window_title TEXT,
+		llm_decision TEXT,
+		reason TEXT,
+		timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (session_id) REFERENCES focus_sessions(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_focus_events_session ON focus_session_events(session_id);
+	CREATE INDEX IF NOT EXISTS idx_focus_events_timestamp ON focus_session_events(timestamp);
 
 	CREATE TABLE IF NOT EXISTS summaries (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,6 +187,24 @@ func (s *Store) initSchema() error {
 
 	_, err := s.db.Exec(schema)
 	return err
+}
+
+// migrateSchema handles schema migrations for existing databases.
+func (s *Store) migrateSchema() error {
+	// Migration: Add focus session tracking columns (v2)
+	migrations := []string{
+		// Add new columns to focus_sessions if they don't exist
+		`ALTER TABLE focus_sessions ADD COLUMN quit_reason TEXT`,
+		`ALTER TABLE focus_sessions ADD COLUMN planned_duration_minutes INTEGER DEFAULT 0`,
+		`ALTER TABLE focus_sessions ADD COLUMN actual_duration_minutes INTEGER DEFAULT 0`,
+	}
+
+	for _, migration := range migrations {
+		// Try to execute migration - will fail if column already exists, which is fine
+		_, _ = s.db.Exec(migration)
+	}
+
+	return nil
 }
 
 // Save persists a capture result.
@@ -705,11 +751,11 @@ func (s *Store) DeleteFocusMode(id string) error {
 }
 
 // StartFocusSession starts a new focus session.
-func (s *Store) StartFocusSession(modeID string) (int64, error) {
+func (s *Store) StartFocusSession(modeID string, plannedDurationMinutes int) (int64, error) {
 	res, err := s.db.Exec(`
-		INSERT INTO focus_sessions (mode_id, started_at, heartbeat)
-		VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, modeID)
+		INSERT INTO focus_sessions (mode_id, started_at, heartbeat, planned_duration_minutes)
+		VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+	`, modeID, plannedDurationMinutes)
 	if err != nil {
 		return 0, err
 	}
@@ -751,11 +797,76 @@ func (s *Store) IncrementFocusSessionBlocks(sessionID int64) error {
 	return err
 }
 
+// FocusSessionEvent represents a behavioral event during a focus session.
+type FocusSessionEvent struct {
+	ID          int64
+	SessionID   int64
+	EventType   string // 'block', 'warn', 'allow', 'switch', 'llm_check'
+	AppClass    string
+	WindowTitle string
+	LLMDecision string // 'ALLOW', 'BLOCK', ''
+	Reason      string
+	Timestamp   time.Time
+}
+
+// SaveFocusSessionEvent logs an event during a focus session.
+func (s *Store) SaveFocusSessionEvent(event *FocusSessionEvent) (int64, error) {
+	res, err := s.db.Exec(`
+		INSERT INTO focus_session_events (session_id, event_type, app_class, window_title, llm_decision, reason, timestamp)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, event.SessionID, event.EventType, event.AppClass, event.WindowTitle, event.LLMDecision, event.Reason, event.Timestamp)
+	if err != nil {
+		return 0, fmt.Errorf("failed to save focus event: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// GetFocusSessionEvents retrieves all events for a session.
+func (s *Store) GetFocusSessionEvents(sessionID int64) ([]FocusSessionEvent, error) {
+	rows, err := s.db.Query(`
+		SELECT id, session_id, event_type, app_class, window_title, llm_decision, reason, timestamp
+		FROM focus_session_events
+		WHERE session_id = ?
+		ORDER BY timestamp ASC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var events []FocusSessionEvent
+	for rows.Next() {
+		var e FocusSessionEvent
+		var llmDecision, reason sql.NullString
+		err := rows.Scan(&e.ID, &e.SessionID, &e.EventType, &e.AppClass, &e.WindowTitle, &llmDecision, &reason, &e.Timestamp)
+		if err != nil {
+			return nil, err
+		}
+		e.LLMDecision = llmDecision.String
+		e.Reason = reason.String
+		events = append(events, e)
+	}
+	return events, nil
+}
+
+// EndFocusSessionWithReason ends a session and records why it ended.
+func (s *Store) EndFocusSessionWithReason(sessionID int64, quitReason string, plannedDuration, actualDuration int) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions 
+		SET ended_at = CURRENT_TIMESTAMP,
+		    quit_reason = ?,
+		    planned_duration_minutes = ?,
+		    actual_duration_minutes = ?
+		WHERE id = ?
+	`, quitReason, plannedDuration, actualDuration, sessionID)
+	return err
+}
+
 // GetActiveFocusSession returns the currently active session if any.
 // Only returns sessions with a heartbeat within the last 2 minutes.
 func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT id, mode_id, started_at, ended_at, blocks_count, COALESCE(heartbeat, started_at)
+		SELECT id, mode_id, started_at, ended_at, blocks_count
 		FROM focus_sessions
 		WHERE ended_at IS NULL
 		  AND (heartbeat IS NULL OR heartbeat > datetime('now', '-2 minutes'))
@@ -765,7 +876,7 @@ func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 	var session FocusSessionRecord
 	var endedAt sql.NullTime
 
-	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount, &session.Heartbeat)
+	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

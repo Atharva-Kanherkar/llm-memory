@@ -61,11 +61,19 @@ func main() {
 				RunWidgetJSON()
 			case "line", "oneline":
 				RunWidgetOneLine()
+			case "waybar":
+				RunWidgetWaybar()
 			default:
 				RunWidget()
 			}
 		} else {
 			RunWidget()
+		}
+	case "ocr":
+		if len(os.Args) < 3 {
+			runOCRStatus()
+		} else {
+			runOCRToggle(os.Args[2])
 		}
 	case "help", "-h", "--help":
 		printHelp()
@@ -87,9 +95,12 @@ Commands:
   query, q     Start interactive query interface
   ask "..."    Ask a single question
   stats, s     Show capture statistics
-  widget, w    Show focus mode widget (floating timer)
-  widget json  Output widget state as JSON (for eww)
-  widget line  Output one-line status (for waybar/polybar)
+  widget, w      Show focus mode widget (floating timer)
+  widget json    Output widget state as JSON (for eww)
+  widget line    Output one-line status with Pango colors
+  widget waybar  Output JSON for waybar (rich tooltip + progress)
+  ocr          Show OCR status
+  ocr on/off   Enable/disable pre-computed OCR
   help         Show this help
 
 Environment:
@@ -240,4 +251,44 @@ func runStats() {
 
 	tui := NewTUI(db, "")
 	tui.showStats(context.Background())
+}
+
+func runOCRStatus() {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	status := "off"
+	if cfg.OCREnabled {
+		status = "on"
+	}
+	fmt.Printf("OCR: %s\n", status)
+	fmt.Println("  Use 'mnemosyne ocr on' or 'mnemosyne ocr off' to toggle")
+}
+
+func runOCRToggle(arg string) {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	switch strings.ToLower(arg) {
+	case "on", "true", "1", "enable":
+		cfg.OCREnabled = true
+		fmt.Println("OCR enabled. Restart daemon to apply.")
+	case "off", "false", "0", "disable":
+		cfg.OCREnabled = false
+		fmt.Println("OCR disabled. Restart daemon to apply.")
+	default:
+		fmt.Printf("Unknown value: %s (use on/off)\n", arg)
+		os.Exit(1)
+	}
+
+	if err := cfg.Save(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
 }

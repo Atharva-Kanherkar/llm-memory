@@ -16,6 +16,7 @@ type Config struct {
 	WindowCaptureEnabled    bool `yaml:"window_capture_enabled"`
 	GitCaptureEnabled       bool `yaml:"git_capture_enabled"`
 	ClipboardCaptureEnabled bool `yaml:"clipboard_capture_enabled"`
+	OCREnabled              bool `yaml:"ocr_enabled"` // Pre-compute OCR on screenshots (uses LLM API)
 
 	StoragePath string `yaml:"storage_path"`
 
@@ -61,6 +62,7 @@ func DefaultConfig() *Config {
 		WindowCaptureEnabled:    true,
 		GitCaptureEnabled:       true,
 		ClipboardCaptureEnabled: true,
+		OCREnabled:              true, // Enable by default, disable to save API costs
 
 		StoragePath: filepath.Join(home, ".local", "share", "mnemosyne"),
 
@@ -127,7 +129,24 @@ func loadFromFile(cfg *Config, path string) error {
 	if err != nil {
 		return err
 	}
-	return yaml.Unmarshal(data, cfg)
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		return err
+	}
+	// Expand ~ in storage path
+	cfg.StoragePath = expandTilde(cfg.StoragePath)
+	return nil
+}
+
+// expandTilde expands ~ to the user's home directory.
+func expandTilde(path string) string {
+	if len(path) == 0 || path[0] != '~' {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return filepath.Join(home, path[1:])
 }
 
 // Save writes the current config to disk.

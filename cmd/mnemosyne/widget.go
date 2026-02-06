@@ -202,7 +202,8 @@ func RunWidgetOneLine() {
 
 	state, err := focus.ReadWidgetState(dataDir)
 	if err != nil || !state.Active {
-		fmt.Println("○ Focus Off")
+		// Beautiful inactive state with soft colors
+		fmt.Println("<span color='#6c7086'>󰒲  Focus</span>")
 		return
 	}
 
@@ -210,8 +211,49 @@ func RunWidgetOneLine() {
 	minutes := (state.ElapsedSecs % 3600) / 60
 	seconds := state.ElapsedSecs % 60
 
-	fmt.Printf("● %s %02d:%02d:%02d [%d blocked]\n",
-		state.ModeName, hours, minutes, seconds, state.BlocksCount)
+	// Format time with leading zero
+	timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+
+	// Color gradient based on session duration (green → yellow → orange)
+	timeColor := getTimeColor(state.ElapsedSecs)
+
+	// Pulsing dot animation based on seconds
+	pulseIcon := "󰐎"
+	if seconds%2 == 0 {
+		pulseIcon = "󰐎"
+	} else {
+		pulseIcon = "󰏦"
+	}
+
+	// Blocks indicator with shield icon if any blocks occurred
+	blocksIndicator := ""
+	if state.BlocksCount > 0 {
+		blocksIndicator = fmt.Sprintf(" <span color='#f38ba8'>󰂭 %d</span>", state.BlocksCount)
+	}
+
+	// Mode name truncated and styled
+	modeName := truncateForWidget(state.ModeName, 15)
+
+	// Build beautiful output with Pango markup for waybar
+	output := fmt.Sprintf("<span color='#a6e3a1'>%s</span> <span color='%s' font_weight='bold'>%s</span> <span color='#89b4fa'>%s</span>%s",
+		pulseIcon, timeColor, timeStr, modeName, blocksIndicator)
+
+	fmt.Println(output)
+}
+
+// getTimeColor returns a color based on elapsed time (green → yellow → orange → red)
+func getTimeColor(elapsedSecs int) string {
+	minutes := elapsedSecs / 60
+	switch {
+	case minutes < 15:
+		return "#a6e3a1" // Green (catppuccin green)
+	case minutes < 30:
+		return "#f9e2af" // Yellow (catppuccin yellow)
+	case minutes < 60:
+		return "#fab387" // Orange (catppuccin peach)
+	default:
+		return "#f38ba8" // Red/Pink (catppuccin red)
+	}
 }
 
 // RunWidgetJSON outputs JSON for eww/custom widgets.
@@ -226,4 +268,100 @@ func RunWidgetJSON() {
 		return
 	}
 	fmt.Println(string(data))
+}
+
+// RunWidgetWaybar outputs rich Pango markup for waybar with progress bar
+func RunWidgetWaybar() {
+	homeDir, _ := os.UserHomeDir()
+	dataDir := filepath.Join(homeDir, ".local", "share", "mnemosyne")
+
+	state, err := focus.ReadWidgetState(dataDir)
+	if err != nil || !state.Active {
+		// Elegant inactive state - dim but visible
+		fmt.Println(`{"text": "<span color='#a6adc8'>󰒲</span> <span color='#6c7086'>focus</span>", "tooltip": "Focus mode inactive\nRun /mode in mnemosyne to start", "class": "inactive"}`)
+		return
+	}
+
+	hours := state.ElapsedSecs / 3600
+	minutes := (state.ElapsedSecs % 3600) / 60
+	seconds := state.ElapsedSecs % 60
+
+	timeStr := fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+	timeColor := getTimeColor(state.ElapsedSecs)
+
+	// Animated icon based on time
+	icons := []string{"󰪥", "󰪤", "󰪣", "󰪢", "󰪡", "󰝥", "󰝦", "󰝧", "󰝨", "󰝩"}
+	icon := icons[(seconds/2)%len(icons)]
+
+	// Progress bar (10 segments)
+	progressBar := renderProgressBar(state.ElapsedSecs, 3600) // 1 hour = full
+
+	// Blocks with icon
+	blocksStr := ""
+	if state.BlocksCount > 0 {
+		blocksStr = fmt.Sprintf("󰂭 %d", state.BlocksCount)
+	} else {
+		blocksStr = "󰄬 Clean"
+	}
+
+	// Build text (what appears in bar) - bright colors for dark waybar background
+	text := fmt.Sprintf("<span color='%s'>%s</span> <span color='%s' font_weight='bold'>%s</span>",
+		timeColor, icon, timeColor, timeStr)
+
+	// Build tooltip (what appears on hover) - use \n for newlines in JSON
+	tooltip := fmt.Sprintf("<b>󰍉 %s</b>\\n%s\\n\\n<b>Duration:</b> %s\\n<b>Blocked:</b> %s\\n\\n<i>Click to open mnemosyne</i>",
+		state.ModeName, progressBar, timeStr, blocksStr)
+
+	// CSS class for styling in waybar config
+	cssClass := "focus-active"
+	if minutes >= 30 {
+		cssClass = "focus-deep"
+	}
+
+	// Output JSON for waybar - ensure proper escaping
+	output := fmt.Sprintf(`{"text": "%s", "tooltip": "%s", "class": "%s", "percentage": %d}`,
+		text, tooltip, cssClass, min(100, state.ElapsedSecs/36))
+
+	fmt.Println(output)
+}
+
+// renderProgressBar creates a visual progress bar
+func renderProgressBar(current, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	percentage := float64(current) / float64(max)
+	if percentage > 1.0 {
+		percentage = 1.0
+	}
+
+	filled := int(percentage * 10)
+	empty := 10 - filled
+
+	filledChar := "█"
+	emptyChar := "░"
+
+	// Color the filled portion
+	var color string
+	switch {
+	case percentage < 0.25:
+		color = "#a6e3a1" // Green
+	case percentage < 0.5:
+		color = "#f9e2af" // Yellow
+	case percentage < 0.75:
+		color = "#fab387" // Orange
+	default:
+		color = "#f38ba8" // Red
+	}
+
+	bar := strings.Repeat(filledChar, filled) + strings.Repeat(emptyChar, empty)
+	return fmt.Sprintf("<span color='%s'>%s</span><span color='#313244'>%s</span> %.0f%%",
+		color, bar[:filled*3], bar[filled*3:], percentage*100)
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

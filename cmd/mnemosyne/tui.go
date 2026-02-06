@@ -1928,7 +1928,7 @@ func (t *TUI) startFocusSession(ctx context.Context, nameOrID string) {
 	}
 
 	// Start session
-	sessionID, err := t.store.StartFocusSession(mode.ID)
+	sessionID, err := t.store.StartFocusSession(mode.ID, mode.DurationMinutes)
 	if err != nil {
 		fmt.Printf(red+"Error starting session: %v%s\n", err, reset)
 		return
@@ -2010,23 +2010,36 @@ func (t *TUI) stopFocusSession(ctx context.Context) {
 		return
 	}
 
-	// End ALL active sessions (cleanup any orphans)
-	ended, err := t.store.EndAllActiveFocusSessions()
-	if err != nil {
-		fmt.Printf(red+"Error ending session: %v%s\n", err, reset)
-		return
-	}
-	if ended > 1 {
-		fmt.Printf(dim+"(cleaned up %d orphaned sessions)%s\n", ended-1, reset)
+	// Get mode details to check if ended early
+	mode, _ := t.store.GetFocusMode(session.ModeID)
+	modeName := "Unknown"
+	plannedDuration := 0
+	if mode != nil {
+		modeName = mode.Name
+		plannedDuration = mode.DurationMinutes
 	}
 
 	// Calculate duration
 	duration := time.Since(session.StartedAt)
+	actualMinutes := int(duration.Minutes())
 
-	// Get mode name
-	modeName := "Unknown"
-	if mode, err := t.store.GetFocusMode(session.ModeID); err == nil {
-		modeName = mode.Name
+	quitReason := ""
+
+	// Check if ended early (more than 5 minutes before planned duration)
+	if plannedDuration > 0 && actualMinutes < (plannedDuration-5) {
+		quitReason = t.askQuitReason(ctx, modeName, plannedDuration, actualMinutes)
+	}
+
+	// End the session with reason
+	if err := t.store.EndFocusSessionWithReason(session.ID, quitReason, plannedDuration, actualMinutes); err != nil {
+		fmt.Printf(red+"Error ending session: %v%s\n", err, reset)
+		return
+	}
+
+	// Cleanup any other orphaned sessions
+	ended, _ := t.store.EndAllActiveFocusSessions()
+	if ended > 1 {
+		fmt.Printf(dim+"(cleaned up %d orphaned sessions)%s\n", ended-1, reset)
 	}
 
 	fmt.Println()
@@ -2034,10 +2047,99 @@ func (t *TUI) stopFocusSession(ctx context.Context) {
 	fmt.Println(blue + "│" + reset)
 	fmt.Printf(blue+"│"+reset+" %s%s%s session complete.\n", bold, modeName, reset)
 	fmt.Println(blue + "│" + reset)
-	fmt.Printf(blue+"│"+reset+" Duration: %s%.0f minutes%s\n", cyan, duration.Minutes(), reset)
+	fmt.Printf(blue+"│"+reset+" Duration: %s%d / %d minutes%s\n", cyan, actualMinutes, plannedDuration, reset)
 	fmt.Printf(blue+"│"+reset+" Distractions blocked: %s%d%s\n", cyan, session.BlocksCount, reset)
+	if quitReason != "" {
+		fmt.Printf(blue+"│"+reset+" Quit reason: %s%s%s\n", dim, quitReason, reset)
+	}
 	fmt.Println(blue + "│" + reset)
 	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// askQuitReason prompts the user why they're quitting early via LLM.
+func (t *TUI) askQuitReason(ctx context.Context, modeName string, planned, actual int) string {
+	if t.llmClient == nil || t.apiKey == "" {
+		// Fallback to simple prompt if no LLM
+		fmt.Println()
+		fmt.Println(yellow + "╭─" + reset + bold + " early quit " + reset + yellow + strings.Repeat("─", 45) + "╮" + reset)
+		fmt.Printf(yellow+"│"+reset+" You ended %s%s%s %d minutes early.\n", bold, modeName, reset, planned-actual)
+		fmt.Println(yellow + "│" + reset)
+		fmt.Print(yellow + "│" + reset + " Why are you stopping? (optional): ")
+		reason, _ := t.reader.ReadString('\n')
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return strings.TrimSpace(reason)
+	}
+
+	// Use LLM to have a brief conversation about why they're quitting
+	fmt.Println()
+	fmt.Println(yellow + "╭─" + reset + bold + " early quit " + reset + yellow + strings.Repeat("─", 45) + "╮" + reset)
+	fmt.Printf(yellow+"│"+reset+" You ended %s%s%s %d minutes early.\n", bold, modeName, reset, planned-actual)
+	fmt.Println(yellow + "│" + reset)
+	fmt.Println(yellow + "│" + reset + " " + dim + "The LLM will ask why - this helps track your focus patterns." + reset)
+	fmt.Println(yellow + "│" + reset)
+
+	prompt := fmt.Sprintf(`The user was in a focus mode called "%s" with a planned duration of %d minutes, but they're quitting after only %d minutes (%d minutes early).
+
+Ask them in a friendly, conversational way why they're stopping early. Keep it very brief (1 sentence + question). Then summarize their response in 2-3 words.
+
+Format your response like this:
+[Your conversational question to the user]
+---
+SUMMARY: [2-3 word summary of their reason]
+
+Example:
+"No worries! What made you decide to stop now?"
+---
+SUMMARY: Task completed early`, modeName, planned, actual, planned-actual)
+
+	response, err := t.llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: prompt},
+	})
+
+	if err != nil {
+		// Fallback
+		fmt.Print(yellow + "│" + reset + " Why are you stopping? (optional): ")
+		reason, _ := t.reader.ReadString('\n')
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return strings.TrimSpace(reason)
+	}
+
+	// Parse response to get question and extract summary later
+	parts := strings.Split(response, "---")
+	question := strings.TrimSpace(parts[0])
+
+	fmt.Printf(yellow+"│"+reset+" %s\n", cyan+question+reset)
+	fmt.Print(yellow + "│" + reset + " ")
+	userResponse, _ := t.reader.ReadString('\n')
+	userResponse = strings.TrimSpace(userResponse)
+
+	// If user didn't answer, return empty
+	if userResponse == "" {
+		fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return ""
+	}
+
+	// Ask LLM to summarize the reason
+	summaryPrompt := fmt.Sprintf(`User was asked why they stopped their focus session early. Their response: "%s"
+
+Summarize this in 2-4 words max. Just output the summary, nothing else.
+Examples: "Task completed", "Got distracted", "Emergency came up", "Feeling tired", "Meeting started"`, userResponse)
+
+	summary, err := t.llmClient.Chat(ctx, []llm.Message{
+		{Role: "user", Content: summaryPrompt},
+	})
+
+	fmt.Println(yellow + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+
+	if err != nil {
+		// Return their raw response if summarization fails
+		if len(userResponse) > 50 {
+			return userResponse[:50]
+		}
+		return userResponse
+	}
+
+	return strings.TrimSpace(summary)
 }
 
 // showFocusStatus shows the current focus mode status.

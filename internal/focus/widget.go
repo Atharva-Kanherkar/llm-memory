@@ -3,6 +3,7 @@ package focus
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -51,9 +52,14 @@ func (w *WidgetBroadcaster) UpdateState(state WidgetState) {
 	// Write to file for external widgets to read
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
+		log.Printf("[widget] Failed to marshal state: %v", err)
 		return
 	}
-	os.WriteFile(w.statePath, data, 0644)
+	if err := os.WriteFile(w.statePath, data, 0644); err != nil {
+		log.Printf("[widget] Failed to write state to %s: %v", w.statePath, err)
+	} else {
+		log.Printf("[widget] Updated state: active=%v, mode=%s, path=%s", state.Active, state.ModeName, w.statePath)
+	}
 }
 
 // RecordDecision records a decision for display.

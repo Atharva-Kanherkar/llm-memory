@@ -111,7 +111,9 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 
 	// Create OCR engine for pre-computing screen text
 	var ocrEngine *ocr.VisionOCR
-	if apiKey != "" {
+	if !cfg.OCREnabled {
+		log.Println("[ocr] OCR disabled in config (set ocr_enabled: true to enable)")
+	} else if apiKey != "" {
 		ocrEngine = ocr.NewVisionOCR(apiKey)
 		log.Println("[ocr] Vision OCR enabled for pre-computed screen text")
 	} else {
@@ -366,8 +368,8 @@ func (m *Manager) captureScreen() error {
 
 	log.Printf("[screen] Captured %s bytes", result.Metadata["size_bytes"])
 
-	// Pre-compute OCR if available
-	if m.ocrEngine != nil && m.ocrEngine.Available() && len(result.RawData) > 0 {
+	// Pre-compute OCR if available and enabled
+	if m.cfg.OCREnabled && m.ocrEngine != nil && m.ocrEngine.Available() && len(result.RawData) > 0 {
 		// Use a separate context with timeout for OCR
 		ocrCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
@@ -609,6 +611,7 @@ func (m *Manager) checkFocusMode() {
 	// Get active session from database
 	session, err := m.store.GetActiveFocusSession()
 	if err != nil {
+		log.Printf("[focus] Error getting active session: %v", err)
 		return
 	}
 
@@ -621,6 +624,8 @@ func (m *Manager) checkFocusMode() {
 		}
 		return
 	}
+
+	log.Printf("[focus] Found active session: %d (mode: %s)", session.ID, session.ModeID)
 
 	// If enforcer is already running with this session, continue
 	if m.focusEnforcer.IsActive() {

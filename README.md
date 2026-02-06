@@ -12,6 +12,7 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 - **Git Activity** — Monitors your repositories, branches, and commits
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
 - **Proactive Assistant** — Desktop notifications for stress spikes, context reminders, and periodic AI insights (~$2.50/month)
+- **Timetable Agent** — Detailed LLM questionnaire that builds/stores schedules and sends timed reminders (desktop + SMTP email)
 - **Focus Mode** — AI-powered distraction blocker with visual window borders and smart browser tab detection
 - **Focus Behavior Tracking** — Stores every window switch, block event, and quit reason to analyze your productivity patterns
 - **Focus Widget** — Beautiful floating timer widget with waybar integration, color-coded timer, and animated icons
@@ -84,6 +85,14 @@ Start the interactive TUI:
 | `/stress` | Show stress/anxiety patterns |
 | `/alerts` | View proactive insights |
 | `/trigger` | Generate insights now |
+| `/timetable` | Build timetable via detailed LLM interview |
+| `/timetable-edit <plan>` | Edit an existing timetable plan |
+| `/timetable-scope <plan> <scope>` | Set day scope (daily/weekdays/weekends/custom days) |
+| `/timetable-override <date> <plan>` | Force a different plan for one calendar day |
+| `/timetable-override-clear <date>` | Remove one-day override |
+| `/timetable-overrides [days]` | List upcoming day overrides |
+| `/timetables` | List saved timetable plans |
+| `/agenda [today\|tomorrow]` | View upcoming timetable tasks |
 | `/mode` | Create a new focus mode (AI conversation) |
 | `/modes` | List saved focus modes |
 | `/start <name>` | Start a focus session |
@@ -108,6 +117,14 @@ Ask a single question without entering the TUI:
 
 ```bash
 ./mnemosyne ask "What was I doing at 2pm?"
+```
+
+### Timetable Reminder Agent (Cloud-Friendly)
+
+Run only timetable reminders (no capture, no Hyprland dependency):
+
+```bash
+./mnemosyne timetable-agent
 ```
 
 ## Privacy & Security
@@ -182,6 +199,19 @@ blocked_keywords:
 llm:
   provider: openrouter
   chat_model: openai/gpt-4o-mini
+
+timetable:
+  enabled: true
+  reminder_check_seconds: 30
+  reminder_lookback_minutes: 360
+  desktop_notifications: true
+  email_notifications: true
+  default_email_to: "you@example.com"
+  email_from: "Mnemosyne <you@example.com>"
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 587
+  smtp_user: "you@example.com"
+  smtp_pass: "app-password"
 ```
 
 ## External Integrations
@@ -508,6 +538,60 @@ insights:
   context_reminders: true
   llm_model: deepseek/deepseek-chat
 ```
+
+## Timetable Agent
+
+Create and run schedule reminders without Gmail OAuth.
+
+### Planner Commands
+
+```bash
+/timetable      # Starts detailed LLM interview, then stores plan
+/timetable-edit <plan-id-or-name>   # LLM-guided edit of an existing plan
+/timetable-scope <plan-id-or-name> <daily|weekdays|weekends|0,1,2...>
+/timetable-delete <plan-id-or-name> # Delete a plan
+/timetable-pause <plan-id-or-name>  # Disable reminders for a plan
+/timetable-resume <plan-id-or-name> # Re-enable reminders for a plan
+/timetable-override <YYYY-MM-DD> <plan-id-or-name> # one-day holiday/weekend override
+/timetable-override-clear <YYYY-MM-DD>
+/timetable-overrides [days]
+/timetables     # Lists stored plans
+/agenda         # Shows next 24h schedule
+/agenda today
+/agenda tomorrow
+```
+
+### Smart Day Routing
+
+- Use one plan for weekdays and another for weekends (`/timetable-scope`).
+- Add one-day overrides for holidays or special days (`/timetable-override`).
+- Overrides are date-scoped and auto-expire after that date; normal routing resumes automatically.
+
+### SMTP Setup (Native Go)
+
+Set SMTP credentials in `~/.config/mnemosyne/config.yaml` under `timetable`, or via env:
+
+```bash
+export MNEMOSYNE_SMTP_HOST="smtp.gmail.com"
+export MNEMOSYNE_SMTP_PORT="587"
+export MNEMOSYNE_SMTP_USER="you@example.com"
+export MNEMOSYNE_SMTP_PASS="app-password"
+export MNEMOSYNE_SMTP_FROM="Mnemosyne <you@example.com>"
+export MNEMOSYNE_DEFAULT_EMAIL_TO="you@example.com"
+```
+
+### Cloud Split Deployment
+
+If you do not want to deploy the full capture stack:
+
+1. Build binary locally: `go build ./cmd/mnemosyne`
+2. Copy only:
+   - `mnemosyne` binary
+   - config file with `timetable` + SMTP values
+   - `mnemosyne.db` if you want existing plans
+3. Run on cloud VM/container: `./mnemosyne timetable-agent`
+
+This process only sends reminders; it does not run Hyprland capture loops.
 
 ## Focus Mode
 

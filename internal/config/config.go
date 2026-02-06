@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,18 +27,34 @@ type Config struct {
 	BlockedKeywords []string `yaml:"blocked_keywords"`
 	Paused          bool     `yaml:"paused"`
 
-	LLM      LLMConfig      `yaml:"llm"`
-	Insights InsightsConfig `yaml:"insights"`
+	LLM       LLMConfig       `yaml:"llm"`
+	Insights  InsightsConfig  `yaml:"insights"`
+	Timetable TimetableConfig `yaml:"timetable"`
 }
 
 // InsightsConfig holds settings for proactive insights.
 type InsightsConfig struct {
-	Enabled              bool `yaml:"enabled"`
-	DesktopNotifications bool `yaml:"desktop_notifications"`
-	BatchIntervalMinutes int  `yaml:"batch_interval_minutes"`
-	StressAlertsEnabled  bool `yaml:"stress_alerts_enabled"`
-	ContextReminders     bool `yaml:"context_reminders"`
+	Enabled              bool   `yaml:"enabled"`
+	DesktopNotifications bool   `yaml:"desktop_notifications"`
+	BatchIntervalMinutes int    `yaml:"batch_interval_minutes"`
+	StressAlertsEnabled  bool   `yaml:"stress_alerts_enabled"`
+	ContextReminders     bool   `yaml:"context_reminders"`
 	LLMModel             string `yaml:"llm_model"`
+}
+
+// TimetableConfig holds settings for timetable generation and reminder delivery.
+type TimetableConfig struct {
+	Enabled                 bool   `yaml:"enabled"`
+	ReminderCheckSeconds    int    `yaml:"reminder_check_seconds"`
+	ReminderLookbackMinutes int    `yaml:"reminder_lookback_minutes"`
+	DesktopNotifications    bool   `yaml:"desktop_notifications"`
+	EmailNotifications      bool   `yaml:"email_notifications"`
+	DefaultEmailTo          string `yaml:"default_email_to"`
+	EmailFrom               string `yaml:"email_from"`
+	SMTPHost                string `yaml:"smtp_host"`
+	SMTPPort                int    `yaml:"smtp_port"`
+	SMTPUser                string `yaml:"smtp_user"`
+	SMTPPass                string `yaml:"smtp_pass"`
 }
 
 // LLMConfig holds settings for the LLM provider.
@@ -96,6 +113,20 @@ func DefaultConfig() *Config {
 			StressAlertsEnabled:  true,
 			ContextReminders:     true,
 			LLMModel:             "deepseek/deepseek-chat",
+		},
+
+		Timetable: TimetableConfig{
+			Enabled:                 true,
+			ReminderCheckSeconds:    30,
+			ReminderLookbackMinutes: 360,
+			DesktopNotifications:    true,
+			EmailNotifications:      false,
+			DefaultEmailTo:          os.Getenv("MNEMOSYNE_DEFAULT_EMAIL_TO"),
+			EmailFrom:               os.Getenv("MNEMOSYNE_SMTP_FROM"),
+			SMTPHost:                os.Getenv("MNEMOSYNE_SMTP_HOST"),
+			SMTPPort:                envInt("MNEMOSYNE_SMTP_PORT", 587),
+			SMTPUser:                os.Getenv("MNEMOSYNE_SMTP_USER"),
+			SMTPPass:                os.Getenv("MNEMOSYNE_SMTP_PASS"),
 		},
 	}
 }
@@ -206,4 +237,20 @@ func (c *Config) ContainsBlockedKeyword(text string) bool {
 		}
 	}
 	return false
+}
+
+func envInt(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+
+	var value int
+	if _, err := fmt.Sscanf(raw, "%d", &value); err != nil {
+		return fallback
+	}
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }

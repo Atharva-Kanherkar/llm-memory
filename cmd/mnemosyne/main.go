@@ -23,6 +23,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/daemon"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/timetable"
 
 	_ "github.com/mattn/go-sqlite3" // SQLite driver
 )
@@ -53,6 +54,8 @@ func main() {
 		runAsk(question)
 	case "stats", "s":
 		runStats()
+	case "timetable-agent", "scheduler":
+		runTimetableAgent()
 	case "widget", "w":
 		// Parse widget subcommand
 		if len(os.Args) > 2 {
@@ -95,6 +98,7 @@ Commands:
   query, q     Start interactive query interface
   ask "..."    Ask a single question
   stats, s     Show capture statistics
+  timetable-agent, scheduler  Run timetable reminders only (cloud-friendly)
   widget, w      Show focus mode widget (floating timer)
   widget json    Output widget state as JSON (for eww)
   widget line    Output one-line status with Pango colors
@@ -110,6 +114,7 @@ Examples:
   mnemosyne                           # Start capturing
   mnemosyne query                     # Interactive mode
   mnemosyne ask "what was I doing?"   # Quick question
+  mnemosyne timetable-agent           # Reminder-only process (no capture)
   mnemosyne widget                    # Focus timer widget`)
 }
 
@@ -171,6 +176,42 @@ func runDaemon() {
 	}
 
 	log.Println("Mnemosyne stopped.")
+}
+
+func runTimetableAgent() {
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	log.Println("Mnemosyne timetable agent starting...")
+
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Failed to get home directory: %v", err)
+	}
+	dataDir := filepath.Join(homeDir, ".local", "share", "mnemosyne")
+
+	store, err := storage.New(dataDir)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+	defer store.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		sig := <-sigChan
+		log.Printf("Received signal %v, shutting down timetable agent...", sig)
+		cancel()
+	}()
+
+	agent := timetable.NewAgent(store, cfg.Timetable)
+	agent.Run(ctx)
 }
 
 func runQuery() {

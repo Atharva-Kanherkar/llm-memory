@@ -31,6 +31,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/platform"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/timetable"
 )
 
 // Manager orchestrates all capture sources.
@@ -63,6 +64,9 @@ type Manager struct {
 
 	// Memory summarizer for persistent context
 	memorySummarizer *memory.Summarizer
+
+	// Timetable reminder agent
+	timetableAgent *timetable.Agent
 
 	// Biometrics trackers (high-frequency)
 	mouseTracker    *biometrics.MouseTracker
@@ -159,6 +163,13 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		log.Println("[memory] Summarizer enabled for persistent context")
 	}
 
+	// Create timetable reminder agent
+	var timetableAgent *timetable.Agent
+	if cfg.Timetable.Enabled {
+		timetableAgent = timetable.NewAgent(store, cfg.Timetable)
+		log.Println("[timetable] Reminder agent enabled")
+	}
+
 	return &Manager{
 		cfg:                cfg,
 		platform:           plat,
@@ -176,6 +187,7 @@ func NewManager(cfg *config.Config, plat *platform.Platform, store *storage.Stor
 		focusEnforcer:      focusEnforcer,
 		apiKey:             apiKey,
 		memorySummarizer:   memorySummarizer,
+		timetableAgent:     timetableAgent,
 		mouseTracker:       biometrics.NewMouseTracker(plat, analyzer),
 		keyboardTracker:    biometrics.NewKeyboardTracker(plat, analyzer),
 	}
@@ -263,6 +275,17 @@ func (m *Manager) Start(ctx context.Context) {
 			log.Println("[memory] Starting memory summarizer")
 			m.memorySummarizer.Run(m.ctx)
 			log.Println("[memory] Memory summarizer stopped")
+		}()
+	}
+
+	// Start timetable reminder agent
+	if m.timetableAgent != nil {
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			log.Println("[timetable] Starting reminder agent")
+			m.timetableAgent.Run(m.ctx)
+			log.Println("[timetable] Reminder agent stopped")
 		}()
 	}
 }

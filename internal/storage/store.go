@@ -183,6 +183,51 @@ func (s *Store) createBaseSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_summaries_type ON summaries(summary_type);
 	CREATE INDEX IF NOT EXISTS idx_summaries_start ON summaries(start_time);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_summaries_unique ON summaries(summary_type, start_time);
+
+	CREATE TABLE IF NOT EXISTS timetable_plans (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		goal TEXT,
+		timezone TEXT NOT NULL,
+		email_to TEXT,
+		recurrence_enabled INTEGER DEFAULT 0,
+		recurrence_interval_days INTEGER DEFAULT 1,
+		weekday_mask INTEGER DEFAULT 127,
+		questionnaire_json TEXT,
+		active INTEGER DEFAULT 1,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_timetable_plans_active ON timetable_plans(active);
+
+	CREATE TABLE IF NOT EXISTS timetable_items (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		plan_id TEXT NOT NULL,
+		title TEXT NOT NULL,
+		details TEXT,
+		start_time DATETIME NOT NULL,
+		end_time DATETIME NOT NULL,
+		notify_at DATETIME NOT NULL,
+		notify_desktop INTEGER DEFAULT 1,
+		notify_email INTEGER DEFAULT 0,
+		notified_desktop_at DATETIME,
+		notified_email_at DATETIME,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (plan_id) REFERENCES timetable_plans(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_timetable_items_plan ON timetable_items(plan_id);
+	CREATE INDEX IF NOT EXISTS idx_timetable_items_notify_at ON timetable_items(notify_at);
+
+	CREATE TABLE IF NOT EXISTS timetable_day_overrides (
+		override_date TEXT PRIMARY KEY, -- YYYY-MM-DD
+		plan_id TEXT NOT NULL,
+		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+		FOREIGN KEY (plan_id) REFERENCES timetable_plans(id) ON DELETE CASCADE
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_timetable_day_overrides_plan ON timetable_day_overrides(plan_id);
 	`
 
 	_, err := s.db.Exec(schema)
@@ -197,6 +242,9 @@ func (s *Store) migrateSchema() error {
 		`ALTER TABLE focus_sessions ADD COLUMN quit_reason TEXT`,
 		`ALTER TABLE focus_sessions ADD COLUMN planned_duration_minutes INTEGER DEFAULT 0`,
 		`ALTER TABLE focus_sessions ADD COLUMN actual_duration_minutes INTEGER DEFAULT 0`,
+		`ALTER TABLE timetable_plans ADD COLUMN recurrence_enabled INTEGER DEFAULT 0`,
+		`ALTER TABLE timetable_plans ADD COLUMN recurrence_interval_days INTEGER DEFAULT 1`,
+		`ALTER TABLE timetable_plans ADD COLUMN weekday_mask INTEGER DEFAULT 127`,
 	}
 
 	for _, migration := range migrations {

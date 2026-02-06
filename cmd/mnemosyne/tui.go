@@ -26,6 +26,7 @@ import (
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/ocr"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/query"
 	"github.com/Atharva-Kanherkar/mnemosyne/internal/storage"
+	"github.com/Atharva-Kanherkar/mnemosyne/internal/timetable"
 )
 
 // ANSI colors for easy access
@@ -184,9 +185,13 @@ type TUI struct {
 	// Focus mode
 	focusBuilder      *focus.Builder
 	inFocusChat       bool
-	activeSessionID   int64        // Currently active focus session (for heartbeat)
+	activeSessionID   int64         // Currently active focus session (for heartbeat)
 	heartbeatStop     chan struct{} // Stop signal for heartbeat goroutine
 	heartbeatStopOnce sync.Once
+
+	// Timetable planner
+	timetableBuilder *timetable.Builder
+	inTimetableChat  bool
 }
 
 // toggleDebug enables or disables debug logging.
@@ -319,6 +324,19 @@ func (t *TUI) printWelcome() {
 	fmt.Println(green + "    /modes" + reset + dim + "     list saved focus modes" + reset)
 	fmt.Println(green + "    /start" + reset + dim + "     start a focus session" + reset)
 	fmt.Println(green + "    /stop" + reset + dim + "      stop focus mode" + reset)
+	fmt.Println()
+	fmt.Println(bold + cyan + "  Timetable Agent:" + reset)
+	fmt.Println(cyan + "    /timetable" + reset + dim + "  build a timetable with detailed LLM interview" + reset)
+	fmt.Println(cyan + "    /timetable-edit" + reset + dim + " edit an existing timetable plan" + reset)
+	fmt.Println(cyan + "    /timetable-scope" + reset + dim + " set days: daily|weekdays|weekends|0,1,2..." + reset)
+	fmt.Println(cyan + "    /timetable-delete" + reset + dim + " delete a timetable plan" + reset)
+	fmt.Println(cyan + "    /timetable-pause" + reset + dim + " disable reminders for a plan" + reset)
+	fmt.Println(cyan + "    /timetable-resume" + reset + dim + " re-enable reminders for a plan" + reset)
+	fmt.Println(cyan + "    /timetable-override" + reset + dim + " force a plan for one date (holiday/weekend)" + reset)
+	fmt.Println(cyan + "    /timetable-override-clear" + reset + dim + " remove one-day override" + reset)
+	fmt.Println(cyan + "    /timetable-overrides" + reset + dim + " list upcoming one-day overrides" + reset)
+	fmt.Println(cyan + "    /timetables" + reset + dim + " list saved timetable plans" + reset)
+	fmt.Println(cyan + "    /agenda" + reset + dim + "     upcoming scheduled tasks (today/tomorrow)" + reset)
 	fmt.Println()
 	fmt.Println(bold + cyan + "  Privacy:" + reset)
 	fmt.Println(red + "    /privacy" + reset + dim + "   view privacy settings" + reset)
@@ -479,6 +497,75 @@ func (t *TUI) handleCommand(ctx context.Context, input string) bool {
 
 	case "/status":
 		t.showFocusStatus(ctx)
+
+	case "/timetable", "/plan":
+		t.startTimetablePlanning(ctx)
+
+	case "/timetable-edit":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /timetable-edit <plan-id-or-name>" + reset)
+		} else {
+			t.startTimetableEditing(ctx, strings.Join(args, " "))
+		}
+
+	case "/timetable-scope":
+		if len(args) < 2 {
+			fmt.Println(yellow + "Usage: /timetable-scope <plan-id-or-name> <daily|weekdays|weekends|0,1,2...>" + reset)
+		} else {
+			scope := args[len(args)-1]
+			selector := strings.Join(args[:len(args)-1], " ")
+			t.setTimetableScope(ctx, selector, scope)
+		}
+
+	case "/timetable-delete":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /timetable-delete <plan-id-or-name>" + reset)
+		} else {
+			t.deleteTimetablePlan(ctx, strings.Join(args, " "))
+		}
+
+	case "/timetable-pause":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /timetable-pause <plan-id-or-name>" + reset)
+		} else {
+			t.toggleTimetablePlan(ctx, strings.Join(args, " "), false)
+		}
+
+	case "/timetable-resume":
+		if len(args) == 0 {
+			fmt.Println(yellow + "Usage: /timetable-resume <plan-id-or-name>" + reset)
+		} else {
+			t.toggleTimetablePlan(ctx, strings.Join(args, " "), true)
+		}
+
+	case "/timetable-override":
+		if len(args) < 2 {
+			fmt.Println(yellow + "Usage: /timetable-override <YYYY-MM-DD> <plan-id-or-name>" + reset)
+		} else {
+			date := args[0]
+			selector := strings.Join(args[1:], " ")
+			t.setTimetableDayOverride(ctx, date, selector)
+		}
+
+	case "/timetable-override-clear":
+		if len(args) != 1 {
+			fmt.Println(yellow + "Usage: /timetable-override-clear <YYYY-MM-DD>" + reset)
+		} else {
+			t.clearTimetableDayOverride(ctx, args[0])
+		}
+
+	case "/timetable-overrides":
+		days := 14
+		if len(args) > 0 {
+			fmt.Sscanf(args[0], "%d", &days)
+		}
+		t.listTimetableDayOverrides(ctx, days)
+
+	case "/timetables", "/plans":
+		t.listTimetablePlans(ctx)
+
+	case "/agenda":
+		t.showAgenda(ctx, args)
 
 	default:
 		fmt.Printf(red+"Unknown command: %s\n"+reset, cmd)
@@ -2185,6 +2272,623 @@ func (t *TUI) showFocusStatus(ctx context.Context) {
 
 	fmt.Println(blue + "│" + reset)
 	fmt.Println(blue + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// startTimetablePlanning runs the detailed LLM timetable interview.
+func (t *TUI) startTimetablePlanning(ctx context.Context) {
+	if t.apiKey == "" {
+		fmt.Println(red + "Error: No API key configured (required for timetable planning)" + reset)
+		return
+	}
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	model := "openai/gpt-4o-mini"
+	if t.llmClient != nil && t.llmClient.ChatModel != "" {
+		model = t.llmClient.ChatModel
+	}
+
+	t.timetableBuilder = timetable.NewBuilder(
+		t.store,
+		t.apiKey,
+		model,
+		t.cfg.Timetable.DefaultEmailTo,
+	)
+	t.inTimetableChat = true
+
+	fmt.Println()
+	fmt.Println(cyan + "╭─" + reset + bold + " timetable agent " + reset + cyan + strings.Repeat("─", 39) + "╮" + reset)
+	fmt.Println(cyan + "│" + reset)
+	fmt.Println(cyan + "│" + reset + " " + dim + "The agent will ask detailed questions before building your schedule." + reset)
+	fmt.Println(cyan + "│" + reset + " " + dim + "Type 'cancel' to exit." + reset)
+	fmt.Println(cyan + "│" + reset)
+
+	first := t.timetableBuilder.Start()
+	fmt.Printf(cyan+"│"+reset+" %s%s%s\n", brightCyan, first, reset)
+	fmt.Println(cyan + "│" + reset)
+
+	for t.inTimetableChat {
+		fmt.Print(cyan + "│" + reset + " " + brightCyan + "You: " + reset)
+		input, err := t.reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+
+		if strings.EqualFold(input, "cancel") {
+			fmt.Println(cyan + "│" + reset + " " + dim + "Cancelled." + reset)
+			t.inTimetableChat = false
+			t.timetableBuilder = nil
+			break
+		}
+
+		response, generated, err := t.timetableBuilder.Chat(input)
+		if err != nil {
+			fmt.Printf(cyan+"│"+reset+" "+red+"Error: %v%s\n", err, reset)
+			continue
+		}
+
+		fmt.Println(cyan + "│" + reset)
+		fmt.Printf(cyan+"│"+reset+" %s%s%s\n", brightCyan, response, reset)
+		fmt.Println(cyan + "│" + reset)
+
+		if generated != nil {
+			t.inTimetableChat = false
+			t.timetableBuilder = nil
+
+			fmt.Println(cyan + "│" + reset + " " + bold + green + "✓ Timetable stored." + reset)
+			fmt.Printf(cyan+"│"+reset+"   Plan: %s%s%s\n", bold, generated.Plan.Name, reset)
+			fmt.Printf(cyan+"│"+reset+"   Tasks: %s%d%s\n", dim, len(generated.Items), reset)
+			fmt.Printf(cyan+"│"+reset+"   Days: %s%s%s\n", dim, weekdayMaskLabel(generated.Plan.WeekdayMask), reset)
+			if generated.Plan.RecurrenceEnabled {
+				fmt.Printf(cyan+"│"+reset+"   Recurrence: %severy %d day(s)%s\n", dim, generated.Plan.RecurrenceDays, reset)
+			}
+			if generated.Plan.EmailTo != "" {
+				fmt.Printf(cyan+"│"+reset+"   Email target: %s%s%s\n", dim, generated.Plan.EmailTo, reset)
+			}
+			fmt.Println(cyan + "│" + reset + " " + dim + "Daemon or timetable-agent will deliver reminders automatically." + reset)
+		}
+	}
+
+	fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// startTimetableEditing runs an LLM conversation to update an existing timetable plan.
+func (t *TUI) startTimetableEditing(ctx context.Context, selector string) {
+	if t.apiKey == "" {
+		fmt.Println(red + "Error: No API key configured (required for timetable editing)" + reset)
+		return
+	}
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	plan, err := t.findTimetablePlan(selector)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	items, err := t.store.GetTimetableItems(plan.ID)
+	if err != nil {
+		fmt.Printf(red+"Error loading plan items: %v%s\n", err, reset)
+		return
+	}
+
+	model := "openai/gpt-4o-mini"
+	if t.llmClient != nil && t.llmClient.ChatModel != "" {
+		model = t.llmClient.ChatModel
+	}
+
+	t.timetableBuilder = timetable.NewBuilder(
+		t.store,
+		t.apiKey,
+		model,
+		t.cfg.Timetable.DefaultEmailTo,
+	)
+	t.inTimetableChat = true
+
+	fmt.Println()
+	fmt.Println(cyan + "╭─" + reset + bold + " timetable edit agent " + reset + cyan + strings.Repeat("─", 34) + "╮" + reset)
+	fmt.Printf(cyan+"│"+reset+" Editing: %s%s%s (%s)\n", bold, plan.Name, reset, plan.ID)
+	fmt.Println(cyan + "│" + reset + " " + dim + "Describe changes. Type 'cancel' to exit." + reset)
+	fmt.Println(cyan + "│" + reset)
+
+	first := t.timetableBuilder.StartEdit(*plan, items)
+	fmt.Printf(cyan+"│"+reset+" %s%s%s\n", brightCyan, first, reset)
+	fmt.Println(cyan + "│" + reset)
+
+	for t.inTimetableChat {
+		fmt.Print(cyan + "│" + reset + " " + brightCyan + "You: " + reset)
+		input, err := t.reader.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		input = strings.TrimSpace(input)
+		if input == "" {
+			continue
+		}
+
+		if strings.EqualFold(input, "cancel") {
+			fmt.Println(cyan + "│" + reset + " " + dim + "Cancelled." + reset)
+			t.inTimetableChat = false
+			t.timetableBuilder = nil
+			break
+		}
+
+		response, generated, err := t.timetableBuilder.Chat(input)
+		if err != nil {
+			fmt.Printf(cyan+"│"+reset+" "+red+"Error: %v%s\n", err, reset)
+			continue
+		}
+
+		fmt.Println(cyan + "│" + reset)
+		fmt.Printf(cyan+"│"+reset+" %s%s%s\n", brightCyan, response, reset)
+		fmt.Println(cyan + "│" + reset)
+
+		if generated != nil {
+			t.inTimetableChat = false
+			t.timetableBuilder = nil
+
+			fmt.Println(cyan + "│" + reset + " " + bold + green + "✓ Timetable updated." + reset)
+			fmt.Printf(cyan+"│"+reset+"   Plan: %s%s%s\n", bold, generated.Plan.Name, reset)
+			fmt.Printf(cyan+"│"+reset+"   Tasks: %s%d%s\n", dim, len(generated.Items), reset)
+			fmt.Printf(cyan+"│"+reset+"   Days: %s%s%s\n", dim, weekdayMaskLabel(generated.Plan.WeekdayMask), reset)
+			if generated.Plan.RecurrenceEnabled {
+				fmt.Printf(cyan+"│"+reset+"   Recurrence: %severy %d day(s)%s\n", dim, generated.Plan.RecurrenceDays, reset)
+			}
+		}
+	}
+
+	fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// listTimetablePlans shows saved timetable plans.
+func (t *TUI) listTimetablePlans(ctx context.Context) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	plans, err := t.store.ListTimetablePlans(20)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(cyan + "╭─" + reset + bold + " timetable plans " + reset + cyan + strings.Repeat("─", 39) + "╮" + reset)
+	fmt.Println(cyan + "│" + reset)
+
+	if len(plans) == 0 {
+		fmt.Println(cyan + "│" + reset + " " + dim + "No timetable plans yet. Use /timetable to create one." + reset)
+		fmt.Println(cyan + "│" + reset)
+		fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	for _, plan := range plans {
+		status := red + "inactive" + reset
+		if plan.Active {
+			status = green + "active" + reset
+		}
+		items, _ := t.store.GetTimetableItems(plan.ID)
+		shortID := plan.ID
+		if len(shortID) > 8 {
+			shortID = shortID[:8]
+		}
+
+		fmt.Printf(cyan+"│"+reset+" %s%s%s (%s) %s\n", bold, plan.Name, reset, shortID, status)
+		if strings.TrimSpace(plan.Goal) != "" {
+			fmt.Printf(cyan+"│"+reset+"   %s%s%s\n", dim, plan.Goal, reset)
+		}
+		fmt.Printf(cyan+"│"+reset+"   Timezone: %s%s%s | Tasks: %s%d%s\n", dim, plan.Timezone, reset, dim, len(items), reset)
+		if plan.RecurrenceEnabled {
+			fmt.Printf(cyan+"│"+reset+"   Recurs: %severy %d day(s)%s\n", dim, plan.RecurrenceDays, reset)
+		}
+		fmt.Printf(cyan+"│"+reset+"   Days: %s%s%s\n", dim, weekdayMaskLabel(plan.WeekdayMask), reset)
+		if plan.EmailTo != "" {
+			fmt.Printf(cyan+"│"+reset+"   Email: %s%s%s\n", dim, plan.EmailTo, reset)
+		}
+		fmt.Println(cyan + "│" + reset)
+	}
+
+	fmt.Println(cyan + "│" + reset + " " + dim + "Use /agenda to inspect upcoming items." + reset)
+	fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+// showAgenda displays upcoming timetable items.
+func (t *TUI) showAgenda(ctx context.Context, args []string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	now := time.Now()
+	start := now
+	end := now.Add(24 * time.Hour)
+
+	if len(args) > 0 {
+		switch strings.ToLower(args[0]) {
+		case "today":
+			start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+			end = start.Add(24 * time.Hour)
+		case "tomorrow":
+			start = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Add(24 * time.Hour)
+			end = start.Add(24 * time.Hour)
+		}
+	}
+
+	events, err := t.store.GetUpcomingTimetableItems(start, end, 100)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	overrideCache := map[string]string{}
+	filtered := make([]storage.TimetableEventRecord, 0, len(events))
+	for _, event := range events {
+		applicable, err := t.isTimetableEventApplicable(event, overrideCache)
+		if err != nil {
+			fmt.Printf(red+"Error evaluating event applicability: %v%s\n", err, reset)
+			return
+		}
+		if applicable {
+			filtered = append(filtered, event)
+		}
+	}
+	events = filtered
+
+	fmt.Println()
+	fmt.Println(cyan + "╭─" + reset + bold + " agenda " + reset + cyan + strings.Repeat("─", 48) + "╮" + reset)
+	fmt.Println(cyan + "│" + reset)
+
+	if len(events) == 0 {
+		fmt.Println(cyan + "│" + reset + " " + dim + "No upcoming timetable tasks in this window." + reset)
+		fmt.Println(cyan + "│" + reset)
+		fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	for _, event := range events {
+		notifyParts := []string{}
+		if event.NotifyDesktop {
+			notifyParts = append(notifyParts, "desktop")
+		}
+		if event.NotifyEmail {
+			notifyParts = append(notifyParts, "email")
+		}
+		notifyStr := "none"
+		if len(notifyParts) > 0 {
+			notifyStr = strings.Join(notifyParts, "+")
+		}
+
+		fmt.Printf(cyan+"│"+reset+" %s%s%s [%s]\n", bold, event.Title, reset, event.PlanName)
+		fmt.Printf(cyan+"│"+reset+"   %s%s - %s%s\n", dim, event.StartTime.Format("Jan 02 15:04"), event.EndTime.Format("15:04"), reset)
+		if strings.TrimSpace(event.Details) != "" {
+			fmt.Printf(cyan+"│"+reset+"   %s%s%s\n", dim, event.Details, reset)
+		}
+		fmt.Printf(cyan+"│"+reset+"   %snotify at %s (%s)%s\n", dim, event.NotifyAt.Format("15:04"), notifyStr, reset)
+		if event.PlanRecurring {
+			fmt.Printf(cyan+"│"+reset+"   %srecurs every %d day(s)%s\n", dim, event.PlanRecurrenceDays, reset)
+		}
+		fmt.Printf(cyan+"│"+reset+"   %sdays: %s%s\n", dim, weekdayMaskLabel(event.PlanWeekdayMask), reset)
+		fmt.Println(cyan + "│" + reset)
+	}
+
+	fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+func (t *TUI) toggleTimetablePlan(ctx context.Context, selector string, active bool) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	plan, err := t.findTimetablePlan(selector)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	if err := t.store.SetTimetablePlanActive(plan.ID, active); err != nil {
+		fmt.Printf(red+"Error updating plan: %v%s\n", err, reset)
+		return
+	}
+
+	state := "paused"
+	if active {
+		state = "active"
+	}
+	fmt.Printf(green+"✓ Plan '%s' is now %s%s\n", plan.Name, state, reset)
+}
+
+func (t *TUI) deleteTimetablePlan(ctx context.Context, selector string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	plan, err := t.findTimetablePlan(selector)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Printf(yellow+"Delete timetable '%s' (%s)? Type 'yes' to confirm: %s", plan.Name, plan.ID, reset)
+	confirm, _ := t.reader.ReadString('\n')
+	confirm = strings.TrimSpace(strings.ToLower(confirm))
+	if confirm != "yes" {
+		fmt.Println(dim + "Cancelled." + reset)
+		return
+	}
+
+	if err := t.store.DeleteTimetablePlan(plan.ID); err != nil {
+		fmt.Printf(red+"Error deleting plan: %v%s\n", err, reset)
+		return
+	}
+	fmt.Printf(green+"✓ Deleted timetable '%s'%s\n", plan.Name, reset)
+}
+
+func (t *TUI) findTimetablePlan(selector string) (*storage.TimetablePlanRecord, error) {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return nil, fmt.Errorf("missing plan selector")
+	}
+
+	plans, err := t.store.ListTimetablePlans(100)
+	if err != nil {
+		return nil, err
+	}
+	if len(plans) == 0 {
+		return nil, fmt.Errorf("no timetable plans available")
+	}
+
+	lower := strings.ToLower(selector)
+	var exact, prefix, nameMatch *storage.TimetablePlanRecord
+	for i := range plans {
+		p := plans[i]
+		switch {
+		case p.ID == selector:
+			exact = &p
+		case strings.HasPrefix(p.ID, selector):
+			if prefix != nil {
+				return nil, fmt.Errorf("selector %q matches multiple plan IDs; use more characters", selector)
+			}
+			prefix = &p
+		case strings.ToLower(p.Name) == lower:
+			if nameMatch != nil {
+				return nil, fmt.Errorf("name %q matches multiple plans; use ID prefix", selector)
+			}
+			nameMatch = &p
+		}
+	}
+
+	if exact != nil {
+		return exact, nil
+	}
+	if prefix != nil {
+		return prefix, nil
+	}
+	if nameMatch != nil {
+		return nameMatch, nil
+	}
+	return nil, fmt.Errorf("plan %q not found", selector)
+}
+
+func (t *TUI) setTimetableScope(ctx context.Context, selector, scope string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	plan, err := t.findTimetablePlan(selector)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	mask, err := parseWeekdayScope(scope)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	if err := t.store.SetTimetablePlanWeekdayMask(plan.ID, mask); err != nil {
+		fmt.Printf(red+"Error updating plan scope: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Printf(green+"✓ Plan '%s' scope set to %s%s\n", plan.Name, weekdayMaskLabel(mask), reset)
+}
+
+func (t *TUI) setTimetableDayOverride(ctx context.Context, date, selector string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	if _, err := time.Parse("2006-01-02", date); err != nil {
+		fmt.Println(yellow + "Date must be YYYY-MM-DD" + reset)
+		return
+	}
+
+	plan, err := t.findTimetablePlan(selector)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	if err := t.store.SetTimetableDayOverride(date, plan.ID); err != nil {
+		fmt.Printf(red+"Error setting override: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Printf(green+"✓ Override set for %s -> %s%s\n", date, plan.Name, reset)
+}
+
+func (t *TUI) clearTimetableDayOverride(ctx context.Context, date string) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+
+	if err := t.store.ClearTimetableDayOverride(date); err != nil {
+		fmt.Printf(red+"Error clearing override: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Printf(green+"✓ Override cleared for %s%s\n", date, reset)
+}
+
+func (t *TUI) listTimetableDayOverrides(ctx context.Context, days int) {
+	if t.store == nil {
+		fmt.Println(red + "Error: Storage not initialized" + reset)
+		return
+	}
+	if days <= 0 {
+		days = 14
+	}
+
+	start := time.Now().Format("2006-01-02")
+	end := time.Now().AddDate(0, 0, days).Format("2006-01-02")
+	records, err := t.store.ListTimetableDayOverrides(start, end, 200)
+	if err != nil {
+		fmt.Printf(red+"Error: %v%s\n", err, reset)
+		return
+	}
+
+	fmt.Println()
+	fmt.Println(cyan + "╭─" + reset + bold + " timetable day overrides " + reset + cyan + strings.Repeat("─", 31) + "╮" + reset)
+	fmt.Println(cyan + "│" + reset)
+	if len(records) == 0 {
+		fmt.Println(cyan + "│" + reset + " " + dim + "No overrides in this window." + reset)
+		fmt.Println(cyan + "│" + reset)
+		fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+		return
+	}
+
+	for _, r := range records {
+		fmt.Printf(cyan+"│"+reset+" %s -> %s%s%s\n", r.Date, bold, r.PlanName, reset)
+		fmt.Printf(cyan+"│"+reset+"   %splan id: %s%s\n", dim, r.PlanID, reset)
+		fmt.Println(cyan + "│" + reset)
+	}
+	fmt.Println(cyan + "╰" + strings.Repeat("─", 58) + "╯" + reset)
+}
+
+func parseWeekdayScope(raw string) (int, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "daily", "all", "everyday":
+		return storage.WeekdayMaskAll, nil
+	case "weekdays", "weekday":
+		return storage.WeekdayMaskFromSlice([]int{1, 2, 3, 4, 5}), nil
+	case "weekends", "weekend":
+		return storage.WeekdayMaskFromSlice([]int{0, 6}), nil
+	}
+
+	if normalized == "" {
+		return 0, fmt.Errorf("empty scope")
+	}
+
+	parts := strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == ',' || r == ' ' || r == ';'
+	})
+	if len(parts) == 0 {
+		return 0, fmt.Errorf("invalid scope")
+	}
+
+	dayNameMap := map[string]int{
+		"sun": 0, "sunday": 0,
+		"mon": 1, "monday": 1,
+		"tue": 2, "tues": 2, "tuesday": 2,
+		"wed": 3, "wednesday": 3,
+		"thu": 4, "thurs": 4, "thursday": 4,
+		"fri": 5, "friday": 5,
+		"sat": 6, "saturday": 6,
+	}
+
+	days := make([]int, 0, len(parts))
+	for _, p := range parts {
+		if day, ok := dayNameMap[p]; ok {
+			days = append(days, day)
+			continue
+		}
+		var n int
+		if _, err := fmt.Sscanf(p, "%d", &n); err != nil {
+			return 0, fmt.Errorf("invalid day token %q", p)
+		}
+		if n < 0 || n > 6 {
+			return 0, fmt.Errorf("day %d out of range (0=Sun..6=Sat)", n)
+		}
+		days = append(days, n)
+	}
+	return storage.WeekdayMaskFromSlice(days), nil
+}
+
+func weekdayMaskLabel(mask int) string {
+	days := storage.WeekdayMaskToSlice(mask)
+	if len(days) == 7 {
+		return "daily"
+	}
+	if len(days) == 5 && days[0] == 1 && days[1] == 2 && days[2] == 3 && days[3] == 4 && days[4] == 5 {
+		return "weekdays (Mon-Fri)"
+	}
+	if len(days) == 2 && days[0] == 0 && days[1] == 6 {
+		return "weekends (Sun,Sat)"
+	}
+
+	names := []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
+	parts := make([]string, 0, len(days))
+	for _, d := range days {
+		if d >= 0 && d < len(names) {
+			parts = append(parts, names[d])
+		}
+	}
+	if len(parts) == 0 {
+		return "daily"
+	}
+	return strings.Join(parts, ",")
+}
+
+func (t *TUI) isTimetableEventApplicable(event storage.TimetableEventRecord, overrideCache map[string]string) (bool, error) {
+	dateKey, weekday := timetableEventDateKey(event)
+
+	overridePlanID, ok := overrideCache[dateKey]
+	if !ok {
+		var err error
+		overridePlanID, err = t.store.GetTimetableDayOverride(dateKey)
+		if err != nil {
+			return false, err
+		}
+		overrideCache[dateKey] = overridePlanID
+	}
+
+	if overridePlanID != "" {
+		return overridePlanID == event.PlanID, nil
+	}
+
+	return storage.WeekdayInMask(event.PlanWeekdayMask, weekday), nil
+}
+
+func timetableEventDateKey(event storage.TimetableEventRecord) (string, time.Weekday) {
+	loc := time.Local
+	if tz := strings.TrimSpace(event.PlanTimezone); tz != "" {
+		if loaded, err := time.LoadLocation(tz); err == nil {
+			loc = loaded
+		}
+	}
+
+	ts := event.StartTime.In(loc)
+	return ts.Format("2006-01-02"), ts.Weekday()
 }
 
 // RunQuery runs the TUI in query mode (main entry point).

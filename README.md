@@ -13,7 +13,8 @@ Mnemosyne continuously captures what you're doing on your computer (windows, scr
 - **Stress Detection** — Analyzes mouse jitter, typing patterns, and window switching to detect anxiety
 - **Proactive Assistant** — Desktop notifications for stress spikes, context reminders, and periodic AI insights (~$2.50/month)
 - **Focus Mode** — AI-powered distraction blocker with visual window borders and smart browser tab detection
-- **Focus Widget** — Beautiful floating timer widget for focus sessions (`mnemosyne widget`)
+- **Focus Behavior Tracking** — Stores every window switch, block event, and quit reason to analyze your productivity patterns
+- **Focus Widget** — Beautiful floating timer widget with waybar integration, color-coded timer, and animated icons
 - **Persistent Memory** — Hierarchical summarization compresses activity into hourly/daily summaries for full-day recall
 - **External Integrations** — Connect to Gmail, Slack, and Google Calendar for comprehensive memory
 - **Natural Language Queries** — Ask questions like "What was I working on this morning?"
@@ -568,9 +569,32 @@ sudo pacman -S wtype
 /mode          # Create new focus mode via AI conversation
 /modes         # List saved modes
 /start <name>  # Start a focus session
-/stop          # End session (shows stats)
+/stop          # End session (shows stats, asks why if early)
 /status        # Current mode and blocks count
 ```
+
+### Behavior Tracking
+
+Mnemosyne now tracks your focus behavior to help you understand your productivity patterns:
+
+| Tracked Data | Description |
+|--------------|-------------|
+| **Window switches** | Every app/tab you switch to during a session |
+| **LLM decisions** | What the AI allowed/blocked and why |
+| **Block events** | Which windows triggered distractions |
+| **Quit reasons** | Why you ended early (if before planned time) |
+| **Duration stats** | Planned vs actual time for each session |
+
+Data is stored in `~/.local/share/mnemosyne/mnemosyne.db` in the `focus_session_events` table.
+
+### Early Quit Detection
+
+When you run `/stop` before your planned session time, the LLM asks why you're quitting. This helps you:
+- Identify common distraction patterns
+- Understand when you're underestimating task time
+- Track completion rates per focus mode
+
+The reason is summarized (e.g., "Task completed", "Got distracted", "Emergency") and stored with your session.
 
 ### Cost
 
@@ -654,7 +678,52 @@ mnemosyne widget json
 
 ### Waybar Integration
 
-Add to your waybar config:
+Add to your `~/.config/waybar/config.jsonc`:
+
+```json
+"custom/mnemosyne": {
+    "exec": "mnemosyne widget waybar",
+    "interval": 1,
+    "return-type": "json",
+    "format": "{}",
+    "class": "mnemosyne"
+}
+```
+
+Add to your `~/.config/waybar/style.css`:
+
+```css
+/* Minimal rectangular focus widget */
+#custom-mnemosyne {
+  margin: 0 8px;
+  padding: 0 4px;
+  transition: all 0.3s ease;
+}
+
+#custom-mnemosyne.inactive {
+  color: #6c7086;
+}
+
+#custom-mnemosyne.focus-active {
+  color: #a6e3a1;
+  border-bottom: 2px solid #a6e3a1;
+}
+
+#custom-mnemosyne.focus-deep {
+  color: #f9e2af;
+  border-bottom: 2px solid #f9e2af;
+}
+```
+
+**Features:**
+- 🎨 **Color-coded timer**: Green → Yellow → Orange → Red as time passes
+- 🔄 **Animated icon**: Changes every 2 seconds while active
+- 📊 **Rich tooltip**: Hover to see progress bar, blocks count, mode name
+- 🎯 **CSS classes**: `inactive`, `focus-active`, `focus-deep` (30+ min)
+
+### Legacy Waybar (simple text)
+
+If you prefer simple text without colors:
 
 ```json
 "custom/mnemosyne": {

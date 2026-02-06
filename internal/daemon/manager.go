@@ -625,6 +625,25 @@ func (m *Manager) checkFocusMode() {
 		return
 	}
 
+	// Check if session has expired (duration exceeded)
+	if session.PlannedDuration > 0 {
+		elapsedMinutes := int(time.Since(session.StartedAt).Minutes())
+		if elapsedMinutes >= session.PlannedDuration {
+			log.Printf("[focus] Session %d expired after %d minutes (planned: %d)",
+				session.ID, elapsedMinutes, session.PlannedDuration)
+			// End the session in DB
+			if err := m.store.EndFocusSessionExpired(session.ID); err != nil {
+				log.Printf("[focus] Failed to end expired session: %v", err)
+			}
+			// Stop the enforcer and send notification
+			if m.focusEnforcer.IsActive() {
+				m.focusEnforcer.SendSessionCompleteNotification(elapsedMinutes)
+				m.focusEnforcer.Stop()
+			}
+			return
+		}
+	}
+
 	log.Printf("[focus] Found active session: %d (mode: %s)", session.ID, session.ModeID)
 
 	// If enforcer is already running with this session, continue

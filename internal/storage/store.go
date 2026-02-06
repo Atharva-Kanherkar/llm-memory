@@ -660,12 +660,13 @@ type FocusModeRecord struct {
 
 // FocusSessionRecord represents a focus session in the database.
 type FocusSessionRecord struct {
-	ID          int64
-	ModeID      string
-	StartedAt   time.Time
-	EndedAt     *time.Time
-	BlocksCount int
-	Heartbeat   time.Time // Last heartbeat from TUI
+	ID              int64
+	ModeID          string
+	StartedAt       time.Time
+	EndedAt         *time.Time
+	BlocksCount     int
+	Heartbeat       time.Time // Last heartbeat from TUI
+	PlannedDuration int       // Planned duration in minutes (0 = no limit)
 }
 
 // SaveFocusMode saves a focus mode to the database.
@@ -789,6 +790,31 @@ func (s *Store) EndAllActiveFocusSessions() (int64, error) {
 	return result.RowsAffected()
 }
 
+// EndFocusSessionWithReason ends a session and records why it ended.
+func (s *Store) EndFocusSessionWithReason(sessionID int64, quitReason string, plannedDuration, actualDuration int) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions 
+		SET ended_at = CURRENT_TIMESTAMP,
+		    quit_reason = ?,
+		    planned_duration_minutes = ?,
+		    actual_duration_minutes = ?
+		WHERE id = ?
+	`, quitReason, plannedDuration, actualDuration, sessionID)
+	return err
+}
+
+// EndFocusSessionExpired ends a session that ran out of time.
+func (s *Store) EndFocusSessionExpired(sessionID int64) error {
+	_, err := s.db.Exec(`
+		UPDATE focus_sessions 
+		SET ended_at = CURRENT_TIMESTAMP,
+		    quit_reason = 'time_up',
+		    actual_duration_minutes = CAST((julianday(CURRENT_TIMESTAMP) - julianday(started_at)) * 24 * 60 AS INTEGER)
+		WHERE id = ?
+	`, sessionID)
+	return err
+}
+
 // IncrementFocusSessionBlocks increments the block count for a session.
 func (s *Store) IncrementFocusSessionBlocks(sessionID int64) error {
 	_, err := s.db.Exec(`
@@ -849,24 +875,11 @@ func (s *Store) GetFocusSessionEvents(sessionID int64) ([]FocusSessionEvent, err
 	return events, nil
 }
 
-// EndFocusSessionWithReason ends a session and records why it ended.
-func (s *Store) EndFocusSessionWithReason(sessionID int64, quitReason string, plannedDuration, actualDuration int) error {
-	_, err := s.db.Exec(`
-		UPDATE focus_sessions 
-		SET ended_at = CURRENT_TIMESTAMP,
-		    quit_reason = ?,
-		    planned_duration_minutes = ?,
-		    actual_duration_minutes = ?
-		WHERE id = ?
-	`, quitReason, plannedDuration, actualDuration, sessionID)
-	return err
-}
-
 // GetActiveFocusSession returns the currently active session if any.
 // Only returns sessions with a heartbeat within the last 2 minutes.
 func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 	row := s.db.QueryRow(`
-		SELECT id, mode_id, started_at, ended_at, blocks_count
+		SELECT id, mode_id, started_at, ended_at, blocks_count, planned_duration_minutes
 		FROM focus_sessions
 		WHERE ended_at IS NULL
 		  AND (heartbeat IS NULL OR heartbeat > datetime('now', '-2 minutes'))
@@ -875,8 +888,9 @@ func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 
 	var session FocusSessionRecord
 	var endedAt sql.NullTime
+	var plannedDuration sql.NullInt64
 
-	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount)
+	err := row.Scan(&session.ID, &session.ModeID, &session.StartedAt, &endedAt, &session.BlocksCount, &plannedDuration)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -886,6 +900,9 @@ func (s *Store) GetActiveFocusSession() (*FocusSessionRecord, error) {
 
 	if endedAt.Valid {
 		session.EndedAt = &endedAt.Time
+	}
+	if plannedDuration.Valid {
+		session.PlannedDuration = int(plannedDuration.Int64)
 	}
 
 	return &session, nil

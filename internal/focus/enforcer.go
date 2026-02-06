@@ -184,6 +184,19 @@ func (e *Enforcer) GetCurrentMode() *FocusMode {
 	return e.mode
 }
 
+// SendSessionCompleteNotification sends a notification when session ends.
+func (e *Enforcer) SendSessionCompleteNotification(duration int) {
+	modeName := ""
+	if e.mode != nil {
+		modeName = e.mode.Name
+	}
+	e.notifier.Send(
+		"Focus Session Complete",
+		fmt.Sprintf("%s ended after %d minutes", modeName, duration),
+		notify.UrgencyNormal,
+	)
+}
+
 // Run starts the enforcement loop.
 func (e *Enforcer) Run(ctx context.Context) {
 	ticker := time.NewTicker(1 * time.Second)

@@ -587,6 +587,13 @@ Mnemosyne now tracks your focus behavior to help you understand your productivit
 
 Data is stored in `~/.local/share/mnemosyne/mnemosyne.db` in the `focus_session_events` table.
 
+### Auto-Stop on Timer Complete
+
+If you set a duration for your focus mode, the session automatically ends when time is up:
+- Desktop notification: "Focus Session Complete"
+- Quit reason recorded as `time_up`
+- Actual duration stored for analytics
+
 ### Early Quit Detection
 
 When you run `/stop` before your planned session time, the LLM asks why you're quitting. This helps you:
